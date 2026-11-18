@@ -25,7 +25,6 @@
   * the FreeRTOS scheduler is NOT started.
   */
 #include "system.h"
-#include "laser.h"
 
 /* ----------------------------------------------------------------------- */
 /*  configuration                                                          */
@@ -35,11 +34,17 @@
 #define SPD_MAX            2000
 
 /* 70 cm straight test: 4*500 lines * 30 gear = 60000 counts / wheel rev */
-#define WHEEL_DIAMETER_MM  69.0f
+#define WHEEL_DIAMETER_MM  76.4f   /* calibrated: 69 mm nominal gave 77.5 cm per 70 cm */
 #define ENCODER_CPR        60000.0f
 #define RUN_CM             70.0f
 #define RUN_SPD            900      /* counts per 20 ms while running */
 #define RUN_TIMEOUT_MS     15000u
+
+/* ICM-20948 heading hold (onboard IMU, I2C) */
+#define GYRO_LSB_PER_DPS   65.5f
+#define GYRO_SIGN          (+1.0f)
+#define YAW_KP             2.0f     /* counts/20ms correction per degree   */
+#define YAW_CORR_MAX       80
 #define KP_NUM             10       /* PWM = KP_NUM*err/10 + integral       */
 #define KI_DIV             8        /* integral += err/KI_DIV               */
 #define PWM_SLEW           400      /* max PWM change per 20 ms tick        */
@@ -61,6 +66,9 @@ static s8 motor_dir[4] = { -1, -1, 1, 1 };
 
 static s8  motor_run;        /* 0 stop, +1 forward, -1 backward */
 static s16 spd_target;       /* counts per control period */
+static s16 spd_tgt[4];       /* per-wheel target (heading correction) */
+static float gyro_bias;
+static float yaw_deg;
 static u8  open_loop;        /* 1 = fixed PWM mode (diagnostic) */
 static s16 open_pwm;
 static u16 servo_angle;
@@ -149,13 +157,6 @@ static void tx_num(USART_TypeDef *u, int v)
   while (n > 0) tx_putc(u, (u8)b[--n]);
 }
 
-static void tx_hexb(USART_TypeDef *u, u8 v)
-{
-  const char *h = "0123456789ABCDEF";
-  tx_putc(u, (u8)h[v >> 4]);
-  tx_putc(u, (u8)h[v & 0x0Fu]);
-}
-
 typedef struct
 {
   USART_TypeDef      *usart;
@@ -168,6 +169,7 @@ typedef struct
 
 static CmdPort port1;
 static CmdPort port3;
+static CmdPort port5;   /* UART5: PC12=TX, PD2=RX */
 
 static void cmd_port_init(CmdPort *p, USART_TypeDef *u, DMA_Stream_TypeDef *s, u32 ch)
 {
@@ -243,6 +245,37 @@ static void servo_broadcast_deg(int deg)
 }
 
 /* ======================================================================= */
+/*  ICM-20948 gyroscope yaw (onboard IMU, software I2C)                    */
+/* ======================================================================= */
+static int16_t gyro_z_raw(void)
+{
+  u8 lo = I2C_ReadOneByte(0xD0u, 0x38u);   /* GYRO_ZOUT_L */
+  u8 hi = I2C_ReadOneByte(0xD0u, 0x37u);   /* GYRO_ZOUT_H */
+  return (int16_t)(((u16)hi << 8) | lo);
+}
+
+static void imu_init(void)
+{
+  long sum = 0;
+  u16 i;
+
+  I2C_WriteOneByte(0xD0u, 0x7Fu, 0x00u);   /* bank 0 */
+  delay_ms(20u);
+  for (i = 0; i < 200u; i++)
+  {
+    sum += gyro_z_raw();
+    delay_ms(3u);
+  }
+  gyro_bias = (float)sum / 200.0f;
+  yaw_deg = 0.0f;
+}
+
+static float gyro_z_dps(void)
+{
+  return ((float)gyro_z_raw() - gyro_bias) / GYRO_LSB_PER_DPS;
+}
+
+/* ======================================================================= */
 /*  speed loop                                                            */
 /* ======================================================================= */
 static void speed_reset(void)
@@ -282,6 +315,23 @@ static void speed_tick(void)
   int d = 0, e, p;
   int raw;
   int raw_sum = 0;
+  float rate;
+  int corr = 0;
+
+  if (motor_run != 0)
+  {
+    rate = gyro_z_dps() * GYRO_SIGN;
+    yaw_deg += rate * 0.02f;
+    corr = (int)(YAW_KP * yaw_deg);
+    if (corr > YAW_CORR_MAX)  corr = YAW_CORR_MAX;
+    if (corr < -YAW_CORR_MAX) corr = -YAW_CORR_MAX;
+  }
+
+  /* left wheels (FL, RL) slow down, right wheels speed up when yaw > 0 */
+  spd_tgt[0] = (s16)((int)spd_target - corr);
+  spd_tgt[1] = (s16)((int)spd_target + corr);
+  spd_tgt[2] = (s16)((int)spd_target - corr);
+  spd_tgt[3] = (s16)((int)spd_target + corr);
 
   for (w = 0; w < 4u; w++)
   {
@@ -310,13 +360,13 @@ static void speed_tick(void)
     meas_spd[w] = (s16)((d + prev_raw[w]) / 2);
     prev_raw[w] = (s16)d;
 
-    e = (int)spd_target - (int)meas_spd[w];
+    e = (int)spd_tgt[w] - (int)meas_spd[w];
     integral[w] += (s32)e / KI_DIV;
     if (integral[w] > INTEG_MAX)  integral[w] = INTEG_MAX;
     if (integral[w] < -INTEG_MAX) integral[w] = -INTEG_MAX;
 
     /* feed-forward: measured speed ~ 0.4*PWM - 100  =>  PWM ~ 2.5*spd + 250 */
-    p = (KP_NUM * e) / 10 + (int)integral[w] + PWM_FF + ((int)spd_target * 25) / 10;
+    p = (KP_NUM * e) / 10 + (int)integral[w] + PWM_FF + ((int)spd_tgt[w] * 25) / 10;
     if (p > PWM_LIM) p = PWM_LIM;
     if (p < 0)       p = 0;
 
@@ -334,6 +384,7 @@ static void run_start(void)
 {
   run_counts = 0;
   run_start_ms = ms_now();
+  yaw_deg = 0.0f;
   run_state = 1u;
   open_loop = 0u;
   motor_run = 1;
@@ -436,13 +487,14 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
   for (j = 0u; (j < 7u) && (c[j] != '\0'); j++) last_cmd[j] = c[j];
   last_cmd[j] = '\0';
   last_cmd_ms = ms_now();
-  last_port = (u == USART1) ? 1u : 3u;
+  last_port = (u == USART1) ? 1u : ((u == USART3) ? 3u : 5u);
 
   if (c[0] == 'F')
   {
     run_state = 0u;
     open_loop = 0u;
     motor_run = 1;
+    yaw_deg = 0.0f;
     speed_reset();
     tx_puts(u, "OK FWD\r\n");
   }
@@ -451,6 +503,7 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
     run_state = 0u;
     open_loop = 0u;
     motor_run = -1;
+    yaw_deg = 0.0f;
     speed_reset();
     tx_puts(u, "OK BACK\r\n");
   }
@@ -554,7 +607,7 @@ int main(void)
 
   systemInit();
 
-  Laser_Init();
+  imu_init();
 
   uart2_init(115200u);
   NVIC_DisableIRQ(USART2_IRQn);
@@ -565,13 +618,18 @@ int main(void)
   NVIC_ClearPendingIRQ(USART1_IRQn);
   NVIC_DisableIRQ(USART3_IRQn);
   NVIC_ClearPendingIRQ(USART3_IRQn);
+  NVIC_DisableIRQ(UART5_IRQn);
+  NVIC_ClearPendingIRQ(UART5_IRQn);
   cmd_port_init(&port1, USART1, DMA2_Stream2, DMA_Channel_4);
   cmd_port_init(&port3, USART3, DMA1_Stream1, DMA_Channel_4);
+  cmd_port_init(&port5, UART5, DMA1_Stream0, DMA_Channel_4);
 
   tx_puts(USART1, "\r\nC30D speed-loop ready\r\n");
   tx_puts(USART3, "\r\nC30D speed-loop ready\r\n");
+  tx_puts(UART5,  "\r\nC30D speed-loop ready\r\n");
   cmd_help(USART1);
   cmd_help(USART3);
+  cmd_help(UART5);
 
   servo_broadcast_deg(0);
   run_target = (s32)((RUN_CM * 10.0f / (3.14159f * WHEEL_DIAMETER_MM)) * ENCODER_CPR);
@@ -598,9 +656,9 @@ int main(void)
     }
 
     delay_ms(5u);
-    Laser_Poll();
     cmd_poll(&port1);
     cmd_poll(&port3);
+    cmd_poll(&port5);
 
     /* USER key (PE0, active low): start the 70 cm straight run */
     {
@@ -636,9 +694,9 @@ int main(void)
     {
       u8 k, w;
       next_log += 1000u;
-      for (k = 0u; k < 2u; k++)
+      for (k = 0u; k < 3u; k++)
       {
-        USART_TypeDef *u = (k == 0u) ? USART1 : USART3;
+        USART_TypeDef *u = (k == 0u) ? USART1 : ((k == 1u) ? USART3 : UART5);
         tx_puts(u, (open_loop != 0u) ? "OL PWM=" : (motor_run > 0 ? "SPD FWD " : (motor_run < 0 ? "SPD BACK " : "SPD STOP ")));
         if (open_loop != 0u) { tx_num(u, (int)open_pwm); tx_putc(u, ' '); }
         tx_puts(u, "tgt=");
@@ -657,14 +715,6 @@ int main(void)
         tx_num(u, (int)last_port);
         tx_puts(u, " CMD=");
         tx_puts(u, last_cmd);
-        tx_puts(u, " LZ=");
-        tx_num(u, (int)Laser.raw_count);
-        tx_putc(u, ':');
-        for (w = 0u; w < 8u; w++)
-        {
-          tx_hexb(u, Laser.raw_last[(u8)((Laser.raw_idx + w) & 7u)]);
-          tx_putc(u, ' ');
-        }
         tx_puts(u, "\r\n");
       }
     }
