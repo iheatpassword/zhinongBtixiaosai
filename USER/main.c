@@ -1,17 +1,24 @@
-﻿/**
+/**
   * @file    main.c
-  * @brief   C30D 4WD/4WS car - STRAIGHT RUN TEST (after direction calibration)
+  * @brief   C30D 4WD/4WS car - SERIAL COMMAND DEBUG INTERFACE
   *
-  * Measured wheel directions (left two were reversed, now all "forward" = +):
-  *     FL = +   FR = +   RL = +   RR = +
+  * Two USB serial ports accept the same commands:
+  *   USART1 "serial1" Type-C (CH9102, PA9=TX / PA10=RX) 115200 8N1
+  *   USART3 "serial3" Type-C (CH340,  PD8=TX / PD9 =RX) 115200 8N1
+  * (whichever port receives a command replies on that same port)
   *
-  * Cycle:  3 s countdown -> forward 2.0 s -> stop 1.5 s -> forward ... (loop)
-  * Wheels on the ground, car aimed at open space.  KEY (PE0):
-  *     short press : select next wheel (FL -> FR -> RL -> RR)
-  *     long  press : invert the direction of the selected wheel (if needed)
+  * Commands (ASCII, CR or LF terminated, case insensitive):
+  *   F / FWD / FORWARD   drive forward until S
+  *   B / BACK            drive backward until S
+  *   S / STOP            stop motors
+  *   T / T90             all steering servos to +90 deg (broadcast ID 0xFE)
+  *   T- / TM90           all steering servos to -90 deg (broadcast)
+  *   C / CENTER          all steering servos to 0 deg (broadcast)
+  *   H / ?               help
   *
-  * OLED: per wheel the current forward sign and the encoder counts per 100 ms.
-  * USART1 (115200): "dir: + + + +  spd: ..." once per second.
+  * Safety: if driving and no command arrives for 5 s -> STOP.
+  * Motor polarity (calibrated): FL=+ FR=+ RL=+ RR=+.
+  * Servo IDs: FL=4 FR=3 RL=2 RR=1, broadcast ID = 0xFE.
   *
   * Based on the WHEELTEC C30D V2.0 official source; only USER/main.c replaced,
   * the FreeRTOS scheduler is NOT started.
@@ -21,49 +28,84 @@
 /* ----------------------------------------------------------------------- */
 /*  configuration                                                          */
 /* ----------------------------------------------------------------------- */
-#define RUN_PWM        2200     /* straight drive PWM                     */
-#define RUN_MS         2000u    /* forward time per cycle                 */
-#define STOP_MS        1500u    /* pause time per cycle                   */
-#define SERVO_CENTER   500
-#define KEY_LONG_MS    800u
-#define KEY_SHORT_MIN  30u
+#define SERVO_CENTER       500
+#define SERVO_UNIT_PER_DEG 4.1667f
+#define SERVO_MOVE_MS      1000u
+#define BROADCAST_ID       0xFEu
+#define CMD_PWM            2200
+#define CMD_TIMEOUT_MS     5000u
+#define RX_BUF_SIZE        128u
 
 /* wheels: FL=0 FR=1 RL=2 RR=3 ; servos: FL=4 FR=3 RL=2 RR=1 */
-static const u8 WHEEL_SERVO[4] = { 4u, 3u, 2u, 1u };
 static const u8 WHEEL_MOTOR[4] = { 0u, 1u, 2u, 3u };
-static const char *WHEEL_NAME[4] = { "FL", "FR", "RL", "RR" };
-static const char *MOTOR_NAME[4] = { "A", "B", "C", "D" };
 
-/* +1 / -1 : PWM sign used as "drive forward" for that wheel.
-   Calibrated on the car: left wheels were reversed, so all are +1 now.    */
+/* +1 / -1 : PWM sign used as "drive forward" for that wheel (calibrated) */
 static s8 motor_dir[4] = { 1, 1, 1, 1 };
 
-static u8  wheel_sel;
-static int16_t wheel_speed[4];
-static u8  run_active;
+static s8  motor_run;        /* 0 stop, +1 forward, -1 backward */
+static u16 servo_angle;      /* last commanded steering angle magnitude */
+static u32 last_cmd_ms;
+static char last_cmd[8];
+static u8  last_port;        /* 1 = USART1, 3 = USART3 */
 
 /* ======================================================================= */
-/*  USART1 debug                                                          */
+/*  generic UART transmit / receive                                        */
 /* ======================================================================= */
-static void u1_putc(u8 b)
+static void tx_putc(USART_TypeDef *u, u8 b)
 {
-  while (USART_GetFlagStatus(USART1, USART_FLAG_TXE) == RESET) { }
-  USART_SendData(USART1, b);
+  while (USART_GetFlagStatus(u, USART_FLAG_TXE) == RESET) { }
+  USART_SendData(u, b);
 }
 
-static void u1_puts(const char *s)
+static void tx_puts(USART_TypeDef *u, const char *s)
 {
-  while (*s != '\0') u1_putc((u8)*s++);
+  while (*s != '\0') tx_putc(u, (u8)*s++);
 }
 
-static void u1_num(int v)
+typedef struct
 {
-  char b[10];
-  u8 n = 0;
-  if (v < 0) { u1_putc('-'); v = -v; }
-  if (v == 0) { u1_putc('0'); return; }
-  while (v > 0) { b[n++] = (char)('0' + (v % 10)); v /= 10; }
-  while (n > 0) u1_putc((u8)b[--n]);
+  USART_TypeDef      *usart;
+  DMA_Stream_TypeDef *stream;
+  u8   buf[RX_BUF_SIZE];
+  u16  last;
+  char line[32];
+  u8   len;
+} CmdPort;
+
+static CmdPort port1;   /* USART1 */
+static CmdPort port3;   /* USART3 */
+
+static void cmd_port_init(CmdPort *p, USART_TypeDef *u, DMA_Stream_TypeDef *s, u32 ch)
+{
+  DMA_InitTypeDef dma;
+
+  p->usart  = u;
+  p->stream = s;
+  p->last   = 0u;
+  p->len    = 0u;
+
+  /* stop the official UART RX interrupt so the DMA can own the data */
+  USART_ITConfig(u, USART_IT_RXNE, DISABLE);
+
+  DMA_DeInit(s);
+  dma.DMA_Channel            = ch;
+  dma.DMA_PeripheralBaseAddr = (u32)&u->DR;
+  dma.DMA_Memory0BaseAddr    = (u32)p->buf;
+  dma.DMA_DIR                = DMA_DIR_PeripheralToMemory;
+  dma.DMA_BufferSize         = RX_BUF_SIZE;
+  dma.DMA_PeripheralInc      = DMA_PeripheralInc_Disable;
+  dma.DMA_MemoryInc          = DMA_MemoryInc_Enable;
+  dma.DMA_PeripheralDataSize = DMA_PeripheralDataSize_Byte;
+  dma.DMA_MemoryDataSize     = DMA_MemoryDataSize_Byte;
+  dma.DMA_Mode               = DMA_Mode_Circular;
+  dma.DMA_Priority           = DMA_Priority_High;
+  dma.DMA_FIFOMode           = DMA_FIFOMode_Disable;
+  dma.DMA_FIFOThreshold      = DMA_FIFOThreshold_1QuarterFull;
+  dma.DMA_MemoryBurst        = DMA_MemoryBurst_Single;
+  dma.DMA_PeripheralBurst    = DMA_PeripheralBurst_Single;
+  DMA_Init(s, &dma);
+  DMA_Cmd(s, ENABLE);
+  USART_DMACmd(u, USART_DMAReq_Rx, ENABLE);
 }
 
 /* ======================================================================= */
@@ -98,10 +140,13 @@ static void servo_move(u8 id, u16 pos, u16 move_ms)
   servo_send(id, 1u, p, 4u);
 }
 
-static void steer_center(void)
+static void servo_broadcast_deg(int deg)
 {
-  u8 w;
-  for (w = 0; w < 4u; w++) servo_move(WHEEL_SERVO[w], SERVO_CENTER, 400u);
+  s16 pos = (s16)((float)SERVO_CENTER + (float)deg * SERVO_UNIT_PER_DEG);
+  if (pos < 0)    pos = 0;
+  if (pos > 1000) pos = 1000;
+  servo_move(BROADCAST_ID, (u16)pos, SERVO_MOVE_MS);
+  servo_angle = (u16)(deg < 0 ? -deg : deg);
 }
 
 /* ======================================================================= */
@@ -118,6 +163,7 @@ static void drive(int pwm)
 static void drive_stop(void)
 {
   Set_Pwm(0, 0, 0, 0, 1500);
+  motor_run = 0;
 }
 
 /* ======================================================================= */
@@ -125,69 +171,123 @@ static void drive_stop(void)
 /* ======================================================================= */
 static void screen(void)
 {
-  u8 i, y;
-  int16_t sp;
-
   OLED_Clear();
-  OLED_ShowString(0, 0, (u8 *)"STRAIGHT TEST");
-
-  for (i = 0; i < 4u; i++)
-  {
-    y = (u8)(10u + 10u * i);
-
-    if (i == wheel_sel) OLED_ShowString(0, y, (u8 *)">");
-    else                OLED_ShowString(0, y, (u8 *)" ");
-
-    OLED_ShowString(8, y, (u8 *)WHEEL_NAME[i]);
-    OLED_ShowString(26, y, (u8 *)MOTOR_NAME[i]);
-    OLED_ShowString(40, y, (u8 *)((motor_dir[i] > 0) ? "+" : "-"));
-
-    sp = wheel_speed[i];
-    if (sp < 0) sp = (int16_t)(-sp);
-    OLED_ShowNumber(48, y, (u32)sp, 4, 12);
-  }
-
-  OLED_ShowString(0, 50, (u8 *)(run_active ? "RUN " : "STOP"));
-  OLED_ShowString(32, 50, (u8 *)"CLK/HOLD");
+  OLED_ShowString(0, 0, (u8 *)"SERIAL CMD 115200");
+  OLED_ShowString(0, 10, (u8 *)"PORT:U");
+  OLED_ShowNumber(48, 10, (u32)last_port, 1, 12);
+  OLED_ShowString(0, 20, (u8 *)"LAST:");
+  OLED_ShowString(48, 20, (u8 *)last_cmd);
+  OLED_ShowString(0, 30, (u8 *)(motor_run > 0 ? "MOTOR: FWD" :
+                                (motor_run < 0 ? "MOTOR: BACK" : "MOTOR: STOP")));
+  OLED_ShowString(0, 40, (u8 *)"SERVO:");
+  OLED_ShowNumber(48, 40, (u32)servo_angle, 3, 12);
+  OLED_ShowString(80, 40, (u8 *)"deg");
+  OLED_ShowString(0, 50, (u8 *)"F B S T T- C H");
   OLED_Refresh_Gram();
 }
 
 /* ======================================================================= */
-/*  key (PE0, active low)                                                 */
+/*  command execution                                                     */
 /* ======================================================================= */
-static void key_scan(void)
+static void cmd_help(USART_TypeDef *u)
 {
-  static u8  key_last = 0u;
-  static u32 t_down = 0u;
-  u32 now = getSysTickCnt();
-  u8  cur = (GPIO_ReadInputDataBit(GPIOE, GPIO_Pin_0) == Bit_RESET) ? 1u : 0u;
+  tx_puts(u, "\r\n=== C30D serial command ===\r\n");
+  tx_puts(u, "F/FWD/FORWARD : drive forward\r\n");
+  tx_puts(u, "B/BACK        : drive backward\r\n");
+  tx_puts(u, "S/STOP        : stop motors\r\n");
+  tx_puts(u, "T/T90         : all servos +90 deg (broadcast)\r\n");
+  tx_puts(u, "T-/TM90       : all servos -90 deg (broadcast)\r\n");
+  tx_puts(u, "C/CENTER      : all servos 0 deg (broadcast)\r\n");
+  tx_puts(u, "H/?           : this help\r\n");
+  tx_puts(u, "===========================\r\n");
+}
 
-  if ((cur != 0u) && (key_last == 0u))
-  {
-    t_down = now;
-  }
-  else if ((cur == 0u) && (key_last != 0u))
-  {
-    u32 dur = now - t_down;
+static void cmd_exec(USART_TypeDef *u, const char *line)
+{
+  char c[16];
+  u8  i = 0u;
+  u8  j;
 
-    if (dur >= KEY_LONG_MS)
+  while ((line[i] != '\0') && (i < 15u))
+  {
+    c[i] = line[i];
+    if ((c[i] >= 'a') && (c[i] <= 'z')) c[i] = (char)(c[i] - 'a' + 'A');
+    i++;
+  }
+  c[i] = '\0';
+  if (i == 0u) return;
+
+  for (j = 0u; (j < 7u) && (c[j] != '\0'); j++) last_cmd[j] = c[j];
+  last_cmd[j] = '\0';
+
+  if ((c[0] == 'F') || (c[0] == 'B') || (c[0] == 'S') ||
+      (c[0] == 'T') || (c[0] == 'C') || (c[0] == 'H') || (c[0] == '?'))
+  {
+    last_cmd_ms = getSysTickCnt();
+    last_port = (u == USART1) ? 1u : 3u;
+
+    if (c[0] == 'F')
     {
-      motor_dir[wheel_sel] = (s8)(-motor_dir[wheel_sel]);
-      u1_puts("FLIP ");
-      u1_puts(WHEEL_NAME[wheel_sel]);
-      u1_puts(" -> ");
-      u1_puts((motor_dir[wheel_sel] > 0) ? "+" : "-");
-      u1_puts("\r\n");
+      motor_run = 1;
+      drive(CMD_PWM);
+      tx_puts(u, "OK FWD\r\n");
     }
-    else if (dur >= KEY_SHORT_MIN)
+    else if (c[0] == 'B')
     {
-      wheel_sel = (u8)((wheel_sel + 1u) & 3u);
-      u1_puts("SEL ");
-      u1_puts(WHEEL_NAME[wheel_sel]);
-      u1_puts("\r\n");
+      motor_run = -1;
+      drive(-CMD_PWM);
+      tx_puts(u, "OK BACK\r\n");
+    }
+    else if (c[0] == 'S')
+    {
+      drive_stop();
+      tx_puts(u, "OK STOP\r\n");
+    }
+    else if (c[0] == 'T')
+    {
+      if (c[1] == '-') { servo_broadcast_deg(-90); tx_puts(u, "OK SERVO -90\r\n"); }
+      else             { servo_broadcast_deg(+90); tx_puts(u, "OK SERVO +90\r\n"); }
+    }
+    else if (c[0] == 'C')
+    {
+      servo_broadcast_deg(0);
+      tx_puts(u, "OK SERVO 0\r\n");
+    }
+    else
+    {
+      cmd_help(u);
     }
   }
-  key_last = cur;
+  else
+  {
+    tx_puts(u, "ERR: H for help\r\n");
+  }
+}
+
+static void cmd_poll(CmdPort *p)
+{
+  u16 pos = (u16)(RX_BUF_SIZE - DMA_GetCurrDataCounter(p->stream));
+  u8  b;
+
+  while (p->last != pos)
+  {
+    b = p->buf[p->last];
+    p->last = (u16)((p->last + 1u) & (RX_BUF_SIZE - 1u));
+
+    if ((b == '\r') || (b == '\n'))
+    {
+      if (p->len > 0u)
+      {
+        p->line[p->len] = '\0';
+        p->len = 0u;
+        cmd_exec(p->usart, p->line);
+      }
+    }
+    else if (p->len < (u8)(sizeof(p->line) - 1u))
+    {
+      p->line[p->len++] = (char)b;
+    }
+  }
 }
 
 /* ======================================================================= */
@@ -195,13 +295,9 @@ static void key_scan(void)
 /* ======================================================================= */
 int main(void)
 {
-  u32 cycle_start;
-  u32 next_sample;
   u32 next_screen;
   u32 next_log;
-  u32 t;
   u8  w;
-  u8  was_run = 0u;
 
   systemInit();
 
@@ -209,86 +305,57 @@ int main(void)
   NVIC_DisableIRQ(USART2_IRQn);
   NVIC_ClearPendingIRQ(USART2_IRQn);
 
-  u1_puts("\r\nC30D straight run test\r\n");
-  u1_puts("dir default: + + + + (left wheels were reversed)\r\n");
+  RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA1 | RCC_AHB1Periph_DMA2, ENABLE);
 
-  steer_center();
+  /* USART1 RX : DMA2 Stream2 / Channel4 ; USART3 RX : DMA1 Stream1 / Channel4 */
+  NVIC_DisableIRQ(USART1_IRQn);
+  NVIC_ClearPendingIRQ(USART1_IRQn);
+  NVIC_DisableIRQ(USART3_IRQn);
+  NVIC_ClearPendingIRQ(USART3_IRQn);
+  cmd_port_init(&port1, USART1, DMA2_Stream2, DMA_Channel_4);
+  cmd_port_init(&port3, USART3, DMA1_Stream1, DMA_Channel_4);
+
+  tx_puts(USART1, "\r\nC30D serial command interface ready\r\n");
+  tx_puts(USART3, "\r\nC30D serial command interface ready\r\n");
+  cmd_help(USART1);
+  cmd_help(USART3);
+
+  servo_broadcast_deg(0);
   drive_stop();
-  delay_ms(1200u);
-
-  /* 3 s countdown so the car can be aimed */
-  OLED_Clear();
-  OLED_ShowString(0, 0, (u8 *)"STRAIGHT TEST");
-  OLED_ShowString(0, 10, (u8 *)"DIR: + + + +");
-  OLED_ShowString(0, 20, (u8 *)"FORWARD 2.0s");
-  OLED_ShowString(0, 30, (u8 *)"STOP    1.5s");
-  OLED_ShowString(0, 40, (u8 *)"KEY: CLK/HOLD");
-  OLED_ShowString(0, 50, (u8 *)"START IN 3s");
-  OLED_Refresh_Gram();
-  delay_ms(3000u);
+  delay_ms(800u);
 
   for (w = 0; w < 4u; w++) (void)Read_Encoder((u8)(2u + w));
 
-  cycle_start = getSysTickCnt();
-  next_sample = cycle_start + 100u;
-  next_screen = cycle_start;
-  next_log    = cycle_start + 1000u;
+  last_cmd_ms = getSysTickCnt();
+  next_screen = 0u;
+  next_log = getSysTickCnt() + 3000u;
 
   while (1)
   {
-    u32 now = getSysTickCnt();
-    t = now - cycle_start;
-
-    run_active = (t < RUN_MS) ? 1u : 0u;
-    if (run_active != 0u) drive(RUN_PWM);
-    else                  drive_stop();
-
-    if ((was_run != 0u) && (run_active == 0u))
-    {
-      u1_puts("run cycle done\r\n");
-    }
-    was_run = run_active;
-
-    if (t >= (RUN_MS + STOP_MS))
-    {
-      cycle_start = now;
-      run_active = 0u;
-    }
-
     delay_ms(10u);
-    key_scan();
+    cmd_poll(&port1);
+    cmd_poll(&port3);
 
-    if (getSysTickCnt() >= next_sample)
+    if ((motor_run != 0) && ((getSysTickCnt() - last_cmd_ms) > CMD_TIMEOUT_MS))
     {
-      next_sample += 100u;
-      wheel_speed[0] = (int16_t)Read_Encoder(2);
-      wheel_speed[1] = (int16_t)Read_Encoder(3);
-      wheel_speed[2] = (int16_t)Read_Encoder(4);
-      wheel_speed[3] = (int16_t)Read_Encoder(5);
+      drive_stop();
+      tx_puts(USART1, "TIMEOUT -> STOP\r\n");
+      tx_puts(USART3, "TIMEOUT -> STOP\r\n");
     }
 
     if (getSysTickCnt() >= next_screen)
     {
-      next_screen += 100u;
+      next_screen += 200u;
       screen();
     }
 
     if (getSysTickCnt() >= next_log)
     {
-      next_log += 1000u;
-      u1_puts("dir: ");
-      for (w = 0; w < 4u; w++)
-      {
-        u1_puts((motor_dir[w] > 0) ? "+" : "-");
-        u1_putc(' ');
-      }
-      u1_puts(" spd: ");
-      for (w = 0; w < 4u; w++)
-      {
-        u1_num((int)wheel_speed[w]);
-        u1_putc(' ');
-      }
-      u1_puts(run_active ? " RUN\r\n" : " STOP\r\n");
+      next_log += 3000u;
+      tx_puts(USART1, motor_run > 0 ? "MOTOR: FWD\r\n" :
+                      (motor_run < 0 ? "MOTOR: BACK\r\n" : "MOTOR: STOP\r\n"));
+      tx_puts(USART3, motor_run > 0 ? "MOTOR: FWD\r\n" :
+                      (motor_run < 0 ? "MOTOR: BACK\r\n" : "MOTOR: STOP\r\n"));
     }
   }
 }
