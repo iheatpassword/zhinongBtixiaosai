@@ -40,7 +40,7 @@
 static const u8 WHEEL_MOTOR[4] = { 0u, 1u, 2u, 3u };
 
 /* +1 / -1 : PWM sign used as "drive forward" for that wheel (calibrated) */
-static s8 motor_dir[4] = { 1, 1, 1, 1 };
+static s8 motor_dir[4] = { -1, -1, 1, 1 };
 
 static s8  motor_run;        /* 0 stop, +1 forward, -1 backward */
 static u16 servo_angle;      /* last commanded steering angle magnitude */
