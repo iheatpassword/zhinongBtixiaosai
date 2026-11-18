@@ -24,6 +24,7 @@
   * the FreeRTOS scheduler is NOT started.
   */
 #include "system.h"
+#include "laser.h"
 
 /* ----------------------------------------------------------------------- */
 /*  configuration                                                          */
@@ -60,6 +61,29 @@ static void tx_putc(USART_TypeDef *u, u8 b)
 static void tx_puts(USART_TypeDef *u, const char *s)
 {
   while (*s != '\0') tx_putc(u, (u8)*s++);
+}
+
+static void tx_num(USART_TypeDef *u, int v)
+{
+  char b[10];
+  u8 n = 0;
+  if (v < 0) { tx_putc(u, '-'); v = -v; }
+  if (v == 0) { tx_putc(u, '0'); return; }
+  while (v > 0) { b[n++] = (char)('0' + (v % 10)); v /= 10; }
+  while (n > 0) tx_putc(u, (u8)b[--n]);
+}
+
+static void tx_hexb(USART_TypeDef *u, u8 v)
+{
+  const char *h = "0123456789ABCDEF";
+  tx_putc(u, (u8)h[v >> 4]);
+  tx_putc(u, (u8)h[v & 0x0Fu]);
+}
+
+static void show_dist(u8 x, u8 y, u16 d)
+{
+  if (d == 0xFFFFu) OLED_ShowString(x, y, (u8 *)"----");
+  else              OLED_ShowNumber(x, y, (u32)d, 4, 12);
 }
 
 typedef struct
@@ -172,17 +196,23 @@ static void drive_stop(void)
 static void screen(void)
 {
   OLED_Clear();
-  OLED_ShowString(0, 0, (u8 *)"SERIAL CMD 115200");
-  OLED_ShowString(0, 10, (u8 *)"PORT:U");
-  OLED_ShowNumber(48, 10, (u32)last_port, 1, 12);
-  OLED_ShowString(0, 20, (u8 *)"LAST:");
-  OLED_ShowString(48, 20, (u8 *)last_cmd);
-  OLED_ShowString(0, 30, (u8 *)(motor_run > 0 ? "MOTOR: FWD" :
-                                (motor_run < 0 ? "MOTOR: BACK" : "MOTOR: STOP")));
-  OLED_ShowString(0, 40, (u8 *)"SERVO:");
-  OLED_ShowNumber(48, 40, (u32)servo_angle, 3, 12);
-  OLED_ShowString(80, 40, (u8 *)"deg");
-  OLED_ShowString(0, 50, (u8 *)"F B S T T- C H");
+  OLED_ShowString(0, 0, (u8 *)"CMD+LASER MON");
+
+  OLED_ShowString(0, 10, (u8 *)"LAST:");
+  OLED_ShowString(48, 10, (u8 *)last_cmd);
+  OLED_ShowString(0, 20, (u8 *)"RX");
+  OLED_ShowNumber(24, 20, (u32)Laser.raw_count, 5, 12);
+
+  OLED_ShowString(0, 30, (u8 *)"L");
+  show_dist(8, 30, Laser.dL);
+  OLED_ShowString(64, 30, (u8 *)"R");
+  show_dist(72, 30, Laser.dR);
+
+  OLED_ShowString(0, 40, (u8 *)"F");
+  show_dist(8, 40, Laser.dF);
+  OLED_ShowString(64, 40, (u8 *)(LaserIsFresh() ? "OK" : "--"));
+
+  OLED_ShowString(0, 50, (u8 *)"UART5 PD2/PC12");
   OLED_Refresh_Gram();
 }
 
@@ -301,6 +331,8 @@ int main(void)
 
   systemInit();
 
+  Laser_Init();          /* UART5 + DMA1 Stream0, laser frame parser */
+
   uart2_init(115200u);
   NVIC_DisableIRQ(USART2_IRQn);
   NVIC_ClearPendingIRQ(USART2_IRQn);
@@ -333,6 +365,7 @@ int main(void)
   while (1)
   {
     delay_ms(10u);
+    Laser_Poll();
     cmd_poll(&port1);
     cmd_poll(&port3);
 
@@ -351,11 +384,31 @@ int main(void)
 
     if (getSysTickCnt() >= next_log)
     {
-      next_log += 3000u;
-      tx_puts(USART1, motor_run > 0 ? "MOTOR: FWD\r\n" :
-                      (motor_run < 0 ? "MOTOR: BACK\r\n" : "MOTOR: STOP\r\n"));
-      tx_puts(USART3, motor_run > 0 ? "MOTOR: FWD\r\n" :
-                      (motor_run < 0 ? "MOTOR: BACK\r\n" : "MOTOR: STOP\r\n"));
+      u8 k;
+      next_log += 1000u;
+      for (k = 0u; k < 2u; k++)
+      {
+        USART_TypeDef *u = (k == 0u) ? USART1 : USART3;
+        tx_puts(u, "P=");
+        tx_num(u, (int)last_port);
+        tx_puts(u, " SVO=");
+        tx_num(u, (int)servo_angle);
+        tx_puts(u, " LASER rx=");
+        tx_num(u, (int)Laser.raw_count);
+        tx_puts(u, " hex=");
+        for (w = 0u; w < 8u; w++)
+        {
+          tx_hexb(u, Laser.raw_last[(u8)((Laser.raw_idx + w) & 7u)]);
+          tx_putc(u, ' ');
+        }
+        tx_puts(u, " L=");
+        tx_num(u, (Laser.dL == 0xFFFFu) ? -1 : (int)Laser.dL);
+        tx_puts(u, " R=");
+        tx_num(u, (Laser.dR == 0xFFFFu) ? -1 : (int)Laser.dR);
+        tx_puts(u, " F=");
+        tx_num(u, (Laser.dF == 0xFFFFu) ? -1 : (int)Laser.dF);
+        tx_puts(u, LaserIsFresh() ? " OK\r\n" : " LOST\r\n");
+      }
     }
   }
 }

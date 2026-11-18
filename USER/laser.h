@@ -1,9 +1,7 @@
 /**
   * @file    laser.h
-  * @brief   UART5 laser range finder link (F103 -> C30D)
-  *          Frame: AA 55 | dL(2) dR(2) dF(2) | flags | CRC8
-  *          distances in mm, little endian, 0xFFFF = invalid
-  *          flags: bit0 front valid, bit1 left valid, bit2 right valid, bit3 comm timeout
+  * @brief   UART5 laser link (F103 -> C30D), with raw byte monitor
+  *          Expected frame: AA 55 | dL(2) dR(2) dF(2) | flags | CRC8
   */
 #ifndef __LASER_H
 #define __LASER_H
@@ -16,8 +14,12 @@ typedef struct
   u16 dR;
   u16 dF;
   u8  flags;
-  u8  valid;      /* frame received within the last 100 ms */
+  u8  valid;
   u32 last_ms;
+  /* raw monitor (for wiring / protocol debugging) */
+  u16 raw_count;      /* total bytes received on UART5                 */
+  u8  raw_last[8];    /* last 8 received bytes (rolling)               */
+  u8  raw_idx;
 } Laser_Data_t;
 
 extern volatile Laser_Data_t Laser;

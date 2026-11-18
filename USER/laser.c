@@ -42,6 +42,11 @@ static void laser_parse_byte(u8 b)
   u8 tmp[9];
   u8 i;
 
+  /* raw monitor: count every byte and keep the last 8 */
+  Laser.raw_count++;
+  Laser.raw_last[Laser.raw_idx & 7u] = b;
+  Laser.raw_idx = (u8)((Laser.raw_idx + 1u) & 7u);
+
   switch (rx_state)
   {
     case 0u:
@@ -81,6 +86,7 @@ static void laser_parse_byte(u8 b)
 void Laser_Init(void)
 {
   DMA_InitTypeDef dma;
+  u8 i;
 
   RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA1, ENABLE);
 
@@ -119,6 +125,9 @@ void Laser_Init(void)
   Laser.flags = 0u;
   Laser.valid = 0u;
   Laser.last_ms = 0u;
+  Laser.raw_count = 0u;
+  Laser.raw_idx = 0u;
+  for (i = 0u; i < 8u; i++) Laser.raw_last[i] = 0u;
 }
 
 void Laser_Poll(void)
