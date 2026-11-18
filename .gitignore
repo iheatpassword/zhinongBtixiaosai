@@ -1,0 +1,36 @@
+# ---- build output ----
+OBJ/
+USER/_*.log
+USER/*.log
+USER/build.log
+USER/flash.log
+
+# ---- Keil / uVision user files ----
+*.uvguix.*
+USER/DebugConfig/
+USER/RTE/
+USER/EventRecorderStub.scvd
+USER/JLinkSettings.ini
+USER/*.scvd
+
+# ---- object / listing / binaries ----
+*.o
+*.crf
+*.d
+*.dep
+*.lnp
+*.axf
+*.hex
+*.bin
+*.map
+*.lst
+*.htm
+*.build_log.htm
+*.uvguix
+*.bak
+
+# ---- tool / os noise ----
+__pycache__/
+*.pyc
+Thumbs.db
+desktop.ini
