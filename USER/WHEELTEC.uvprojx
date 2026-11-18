@@ -397,6 +397,11 @@
               <FileType>1</FileType>
               <FilePath>.\main.c</FilePath>
             </File>
+          <File>
+            <FileName>laser.c</FileName>
+            <FileType>1</FileType>
+            <FilePath>.\laser.c</FilePath>
+          </File>
             <File>
               <FileName>stm32f4xx_it.c</FileName>
               <FileType>1</FileType>
@@ -552,6 +557,11 @@
               <FileType>1</FileType>
               <FilePath>..\FWLIB\src\stm32f4xx_usart.c</FilePath>
             </File>
+          <File>
+            <FileName>stm32f4xx_dma.c</FileName>
+            <FileType>1</FileType>
+            <FilePath>..\FWLIB\src\stm32f4xx_dma.c</FilePath>
+          </File>
             <File>
               <FileName>stm32f4xx_adc.c</FileName>
               <FileType>1</FileType>

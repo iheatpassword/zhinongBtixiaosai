@@ -28,6 +28,7 @@
 
 #include "system.h"
 #include <math.h>
+#include "laser.h"
 
 /* ----------------------------------------------------------------------- */
 /*  calibration / configuration                                            */
@@ -92,6 +93,41 @@ static void u1_dec1(int v10)   /* print v10/10 with one decimal */
   u1_num(v10 / 10);
   u1_putc('.');
   u1_putc((u8)('0' + (v10 % 10)));
+}
+
+static u32 next_log_ms;
+
+static void log_tick(void)
+{
+  u32 now = getSysTickCnt();
+
+  if ((now - next_log_ms) >= 500u)
+  {
+    next_log_ms = now;
+    u1_puts("L=");
+    u1_num((Laser.dL == 0xFFFFu) ? -1 : (int)Laser.dL);
+    u1_puts(" R=");
+    u1_num((Laser.dR == 0xFFFFu) ? -1 : (int)Laser.dR);
+    u1_puts(" F=");
+    u1_num((Laser.dF == 0xFFFFu) ? -1 : (int)Laser.dF);
+    u1_puts(" fl=");
+    u1_num((int)Laser.flags);
+    u1_puts(" laser=");
+    u1_puts(LaserIsFresh() ? "OK" : "LOST");
+    u1_puts("\r\n");
+  }
+}
+
+/* blocking delay that keeps the laser DMA parser and the debug log alive */
+static void Poll_Delay(u16 ms)
+{
+  u16 t;
+  for (t = 0; t < ms; t = (u16)(t + 5u))
+  {
+    delay_ms(5u);
+    Laser_Poll();
+    log_tick();
+  }
 }
 
 /* ======================================================================= */
@@ -218,31 +254,35 @@ static void show_signed(u8 x, u8 y, int32_t v, u8 digits)
   OLED_ShowNumber((u8)(x + 8u), y, (u32)v, digits, 12);
 }
 
+static void show_dist(u8 x, u8 y, u16 d)
+{
+  if (d == 0xFFFFu)
+  {
+    OLED_ShowString(x, y, (u8 *)"----");
+  }
+  else
+  {
+    OLED_ShowNumber(x, y, (u32)d, 4, 12);
+  }
+}
+
 static void screen(const char *mode, float yaw_deg)
 {
-  int16_t e0, e1, e2, e3;
-
-  e0 = (int16_t)Read_Encoder(2);
-  e1 = (int16_t)Read_Encoder(3);
-  e2 = (int16_t)Read_Encoder(4);
-  e3 = (int16_t)Read_Encoder(5);
-
   OLED_Clear();
   OLED_ShowString(0, 0, (u8 *)"C30D STD/TURN90");
   OLED_ShowString(0, 10, (u8 *)mode);
 
-  OLED_ShowString(0, 20, (u8 *)"YAW");
-  show_signed(24, 20, (int32_t)(yaw_deg * 10.0f), 4);
+  OLED_ShowString(0, 20, (u8 *)"L");
+  show_dist(8, 20, Laser.dL);
+  OLED_ShowString(40, 20, (u8 *)"R");
+  show_dist(48, 20, Laser.dR);
 
-  OLED_ShowString(0, 30, (u8 *)"E1");
-  show_signed(16, 30, e0, 4);
-  OLED_ShowString(58, 30, (u8 *)"E2");
-  show_signed(74, 30, e1, 4);
+  OLED_ShowString(0, 30, (u8 *)"F");
+  show_dist(8, 30, Laser.dF);
+  OLED_ShowString(44, 30, (u8 *)(LaserIsFresh() ? "OK " : "---"));
 
-  OLED_ShowString(0, 40, (u8 *)"E3");
-  show_signed(16, 40, e2, 4);
-  OLED_ShowString(58, 40, (u8 *)"E4");
-  show_signed(74, 40, e3, 4);
+  OLED_ShowString(0, 40, (u8 *)"YAW");
+  show_signed(32, 40, (int32_t)(yaw_deg * 10.0f), 4);
 
   OLED_ShowString(0, 50, (u8 *)"B");
   oled_showfloat(Get_battery_volt(), 8, 50, 2, 1);
@@ -265,12 +305,12 @@ static void Go_Straight(u16 ms, int pwm)
   u1_puts("\r\n");
 
   steer_all(0.0f, 400u);       /* wheels straight */
-  delay_ms(500u);
+  Poll_Delay(500u);
   drive(pwm);
 
   for (t = 0; t < ms; t += 20u)
   {
-    delay_ms(20u);
+    Poll_Delay(20u);
     yaw += gyro_z_dps() * 0.02f;       /* just for display  */
     screen("STRAIGHT", yaw);
   }
@@ -302,13 +342,13 @@ static void Turn_InPlace(float angle_deg)
      the rotation direction.  First 300 ms: detect the actual yaw direction
      and flip the drive sign if necessary.                              */
   steer_rotate(TURN_STEER_DEG, 1.0f, 500u);
-  delay_ms(700u);
+  Poll_Delay(700u);
 
   drive(TURN_PWM);
   y_test = 0.0f;
   for (t = 0; t < 300u; t += 20u)
   {
-    delay_ms(20u);
+    Poll_Delay(20u);
     y_test += (gyro_z_dps() * GYRO_SIGN) * 0.02f;
     screen("TURN 90", y_test);
   }
@@ -326,7 +366,7 @@ static void Turn_InPlace(float angle_deg)
   t = 0;
   while ((yaw * rot < target) && (t < TURN_TIMEOUT_MS))
   {
-    delay_ms(10u);
+    Poll_Delay(10u);
     t = (u16)(t + 10u);
     rate = gyro_z_dps() * GYRO_SIGN;
     yaw += rate * 0.01f;
@@ -342,7 +382,7 @@ static void Turn_InPlace(float angle_deg)
   u1_num((int)t);
   u1_puts(" ms\r\n");
 
-  delay_ms(300u);
+  Poll_Delay(300u);
 }
 
 /* ======================================================================= */
@@ -384,6 +424,8 @@ int main(void)
 
   systemInit();          /* official hardware init, no RTOS start */
 
+  Laser_Init();          /* UART5 + DMA1 Stream0, laser frame parser */
+
   /* serial ports */
   uart2_init(115200u);   /* bus servos */
   NVIC_DisableIRQ(USART2_IRQn);
@@ -403,12 +445,12 @@ int main(void)
   OLED_ShowString(0, 40, (u8 *)"RL C-E3-S2");
   OLED_ShowString(0, 50, (u8 *)"RR D-E4-S1");
   OLED_Refresh_Gram();
-  delay_ms(1500);
+  Poll_Delay(1500u);
 
   /* centre all steering servos */
   steer_all(0.0f, 500u);
   drive_stop();
-  delay_ms(800u);
+  Poll_Delay(800u);
 
   /* gyro bias calibration, car must stand still (about 0.6 s) */
   gyro_init();
@@ -421,15 +463,15 @@ int main(void)
   while (1)
   {
     Go_Straight(STRAIGHT_MS, STRAIGHT_PWM);
-    delay_ms(700u);
+    Poll_Delay(700u);
 
     Turn_InPlace(+TURN_ANGLE_DEG);
-    delay_ms(700u);
+    Poll_Delay(700u);
 
     Go_Straight(STRAIGHT_MS, STRAIGHT_PWM);
-    delay_ms(700u);
+    Poll_Delay(700u);
 
     Turn_InPlace(-TURN_ANGLE_DEG);
-    delay_ms(700u);
+    Poll_Delay(700u);
   }
 }
