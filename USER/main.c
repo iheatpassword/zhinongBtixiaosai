@@ -1,21 +1,17 @@
-/**
+﻿/**
   * @file    main.c
-  * @brief   C30D 4WD/4WS car - STRAIGHT DRIVE DIRECTION CALIBRATION
+  * @brief   C30D 4WD/4WS car - STRAIGHT RUN TEST (after direction calibration)
   *
-  * Wheels must be lifted off the ground (the motors run continuously at a low
-  * PWM so you can watch the rotation direction of each wheel).
+  * Measured wheel directions (left two were reversed, now all "forward" = +):
+  *     FL = +   FR = +   RL = +   RR = +
   *
-  *   - after boot the four steering servos go to centre and the motors start
-  *     running slowly forward with the current direction table
-  *   - KEY (PE0) short press  : select next wheel (FL -> FR -> RL -> RR)
-  *   - KEY (PE0) long  press  : invert the direction of the selected wheel
+  * Cycle:  3 s countdown -> forward 2.0 s -> stop 1.5 s -> forward ... (loop)
+  * Wheels on the ground, car aimed at open space.  KEY (PE0):
+  *     short press : select next wheel (FL -> FR -> RL -> RR)
+  *     long  press : invert the direction of the selected wheel (if needed)
   *
-  * ORANGE = currently selected wheel, the displayed +/- is the PWM sign that
-  * the firmware uses as "forward" for that wheel, and the 4-digit number is the
-  * encoder counts per 100 ms (to confirm the encoder works).
-  *
-  * When all four wheels rotate in the "car forward" direction, write the four
-  * signs into MOTOR_DIR[] below (or tell them to the developer) and rebuild.
+  * OLED: per wheel the current forward sign and the encoder counts per 100 ms.
+  * USART1 (115200): "dir: + + + +  spd: ..." once per second.
   *
   * Based on the WHEELTEC C30D V2.0 official source; only USER/main.c replaced,
   * the FreeRTOS scheduler is NOT started.
@@ -25,7 +21,9 @@
 /* ----------------------------------------------------------------------- */
 /*  configuration                                                          */
 /* ----------------------------------------------------------------------- */
-#define CAL_PWM        1800     /* slow drive PWM used for calibration    */
+#define RUN_PWM        2200     /* straight drive PWM                     */
+#define RUN_MS         2000u    /* forward time per cycle                 */
+#define STOP_MS        1500u    /* pause time per cycle                   */
 #define SERVO_CENTER   500
 #define KEY_LONG_MS    800u
 #define KEY_SHORT_MIN  30u
@@ -37,11 +35,12 @@ static const char *WHEEL_NAME[4] = { "FL", "FR", "RL", "RR" };
 static const char *MOTOR_NAME[4] = { "A", "B", "C", "D" };
 
 /* +1 / -1 : PWM sign used as "drive forward" for that wheel.
-   Runtime editable with the key; copy the final values here.              */
-static s8 motor_dir[4] = { -1, 1, -1, 1 };
+   Calibrated on the car: left wheels were reversed, so all are +1 now.    */
+static s8 motor_dir[4] = { 1, 1, 1, 1 };
 
 static u8  wheel_sel;
 static int16_t wheel_speed[4];
+static u8  run_active;
 
 /* ======================================================================= */
 /*  USART1 debug                                                          */
@@ -130,7 +129,7 @@ static void screen(void)
   int16_t sp;
 
   OLED_Clear();
-  OLED_ShowString(0, 0, (u8 *)"STRAIGHT CAL");
+  OLED_ShowString(0, 0, (u8 *)"STRAIGHT TEST");
 
   for (i = 0; i < 4u; i++)
   {
@@ -148,7 +147,8 @@ static void screen(void)
     OLED_ShowNumber(48, y, (u32)sp, 4, 12);
   }
 
-  OLED_ShowString(0, 50, (u8 *)"CLK:NEXT HLD:FLIP");
+  OLED_ShowString(0, 50, (u8 *)(run_active ? "RUN " : "STOP"));
+  OLED_ShowString(32, 50, (u8 *)"CLK/HOLD");
   OLED_Refresh_Gram();
 }
 
@@ -195,45 +195,66 @@ static void key_scan(void)
 /* ======================================================================= */
 int main(void)
 {
+  u32 cycle_start;
   u32 next_sample;
   u32 next_screen;
   u32 next_log;
+  u32 t;
   u8  w;
+  u8  was_run = 0u;
 
   systemInit();
 
-  /* bus servo board */
   uart2_init(115200u);
   NVIC_DisableIRQ(USART2_IRQn);
   NVIC_ClearPendingIRQ(USART2_IRQn);
 
-  u1_puts("\r\nC30D straight direction calibration\r\n");
-  u1_puts("KEY: short = next wheel, long = flip direction\r\n");
+  u1_puts("\r\nC30D straight run test\r\n");
+  u1_puts("dir default: + + + + (left wheels were reversed)\r\n");
 
   steer_center();
   drive_stop();
   delay_ms(1200u);
 
-  /* boot screen */
+  /* 3 s countdown so the car can be aimed */
   OLED_Clear();
-  OLED_ShowString(0, 0, (u8 *)"STRAIGHT CAL");
-  OLED_ShowString(0, 10, (u8 *)"LIFT THE CAR!");
-  OLED_ShowString(0, 20, (u8 *)"SERVO -> CENTER");
-  OLED_ShowString(0, 30, (u8 *)"MOTOR -> SLOW FWD");
-  OLED_ShowString(0, 40, (u8 *)"CLK:NEXT HLD:FLIP");
+  OLED_ShowString(0, 0, (u8 *)"STRAIGHT TEST");
+  OLED_ShowString(0, 10, (u8 *)"DIR: + + + +");
+  OLED_ShowString(0, 20, (u8 *)"FORWARD 2.0s");
+  OLED_ShowString(0, 30, (u8 *)"STOP    1.5s");
+  OLED_ShowString(0, 40, (u8 *)"KEY: CLK/HOLD");
+  OLED_ShowString(0, 50, (u8 *)"START IN 3s");
   OLED_Refresh_Gram();
-  delay_ms(2000u);
+  delay_ms(3000u);
 
   for (w = 0; w < 4u; w++) (void)Read_Encoder((u8)(2u + w));
 
-  drive(CAL_PWM);
-
-  next_sample = getSysTickCnt() + 100u;
-  next_screen = getSysTickCnt();
-  next_log    = getSysTickCnt() + 1000u;
+  cycle_start = getSysTickCnt();
+  next_sample = cycle_start + 100u;
+  next_screen = cycle_start;
+  next_log    = cycle_start + 1000u;
 
   while (1)
   {
+    u32 now = getSysTickCnt();
+    t = now - cycle_start;
+
+    run_active = (t < RUN_MS) ? 1u : 0u;
+    if (run_active != 0u) drive(RUN_PWM);
+    else                  drive_stop();
+
+    if ((was_run != 0u) && (run_active == 0u))
+    {
+      u1_puts("run cycle done\r\n");
+    }
+    was_run = run_active;
+
+    if (t >= (RUN_MS + STOP_MS))
+    {
+      cycle_start = now;
+      run_active = 0u;
+    }
+
     delay_ms(10u);
     key_scan();
 
@@ -267,7 +288,7 @@ int main(void)
         u1_num((int)wheel_speed[w]);
         u1_putc(' ');
       }
-      u1_puts("\r\n");
+      u1_puts(run_active ? " RUN\r\n" : " STOP\r\n");
     }
   }
 }
