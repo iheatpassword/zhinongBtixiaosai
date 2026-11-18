@@ -32,7 +32,14 @@
 /* ----------------------------------------------------------------------- */
 #define CTRL_MS            20u      /* speed loop period                    */
 #define SPD_DEFAULT        150      /* counts per CTRL_MS                   */
-#define SPD_MAX            600
+#define SPD_MAX            2000
+
+/* 70 cm straight test: 4*500 lines * 30 gear = 60000 counts / wheel rev */
+#define WHEEL_DIAMETER_MM  69.0f
+#define ENCODER_CPR        60000.0f
+#define RUN_CM             70.0f
+#define RUN_SPD            900      /* counts per 20 ms while running */
+#define RUN_TIMEOUT_MS     15000u
 #define KP_NUM             10       /* PWM = KP_NUM*err/10 + integral       */
 #define KI_DIV             8        /* integral += err/KI_DIV               */
 #define PWM_SLEW           400      /* max PWM change per 20 ms tick        */
@@ -66,6 +73,13 @@ static s16 meas_spd[4];      /* filtered absolute counts per period */
 static s16 prev_raw[4];
 static s16 pwm_out[4];
 static s32 integral[4];
+
+/* 70 cm straight-run test state */
+static u8  run_state;        /* 0 idle, 1 running, 2 done */
+static s32 run_counts;       /* average encoder counts travelled */
+static s32 run_target;       /* counts for 70 cm */
+static u32 run_start_ms;
+static u8  key_last;
 
 /* ======================================================================= */
 /*  1 ms time base (TIM6) - the official ms_now() does not run in    */
@@ -267,12 +281,14 @@ static void speed_tick(void)
   u8  w;
   int d = 0, e, p;
   int raw;
+  int raw_sum = 0;
 
   for (w = 0; w < 4u; w++)
   {
     raw = Read_Encoder((u8)(2u + w));
     if (raw < 0) raw = -raw;
     if (raw > 32000) raw = 32000;
+    raw_sum += raw;
     d = raw;
 
     if (motor_run == 0)
@@ -310,7 +326,42 @@ static void speed_tick(void)
 
     pwm_out[w] = (s16)p;
   }
+  if (run_state == 1u) run_counts += (raw_sum / 4);
   speed_apply();
+}
+
+static void run_start(void)
+{
+  run_counts = 0;
+  run_start_ms = ms_now();
+  run_state = 1u;
+  open_loop = 0u;
+  motor_run = 1;
+  spd_target = RUN_SPD;
+  speed_reset();
+  tx_puts(USART1, "70CM START\r\n");
+  tx_puts(USART3, "70CM START\r\n");
+}
+
+static void run_stop(const char *why)
+{
+  motor_run = 0;
+  speed_reset();
+  run_state = 2u;
+  tx_puts(USART1, why);
+  tx_puts(USART3, why);
+  tx_puts(USART1, " counts=");
+  tx_puts(USART3, " counts=");
+  tx_num(USART1, (int)run_counts);
+  tx_num(USART3, (int)run_counts);
+  tx_puts(USART1, "\r\n");
+  tx_puts(USART3, "\r\n");
+}
+
+/* distance in 0.1 mm units (avoids float in the display path) */
+static s32 run_dist_01mm(void)
+{
+  return (s32)((float)run_counts * 3.14159f * WHEEL_DIAMETER_MM * 10.0f / ENCODER_CPR);
 }
 
 /* ======================================================================= */
@@ -319,24 +370,25 @@ static void speed_tick(void)
 static void screen(void)
 {
   u8 i, y;
+  s32 d01 = run_dist_01mm();
 
   OLED_Clear();
-  OLED_ShowString(0, 0, (u8 *)"SPEED LOOP 50Hz");
+  OLED_ShowString(0, 0, (u8 *)"70cm STRAIGHT");
+  OLED_ShowString(0, 10, (u8 *)(run_state == 0u ? "READY KEY/G" :
+                                (run_state == 1u ? "RUNNING" : "DONE")));
+  OLED_ShowString(64, 10, (u8 *)"D:");
+  OLED_ShowNumber(80, 10, (u32)(d01 / 10), 3, 12);
+  OLED_ShowString(104, 10, (u8 *)"cm");
 
   for (i = 0; i < 4u; i++)
   {
-    y = (u8)(10u + 10u * i);
+    y = (u8)(20u + 10u * i);
     OLED_ShowString(0, y, (u8 *)((i == 0u) ? "FL" : (i == 1u) ? "FR" : (i == 2u) ? "RL" : "RR"));
     OLED_ShowNumber(18, y, (u32)meas_spd[i], 3, 12);
     OLED_ShowString(38, y, (u8 *)"/");
     OLED_ShowNumber(44, y, (u32)spd_target, 3, 12);
     OLED_ShowNumber(70, y, (u32)pwm_out[i], 4, 12);
   }
-
-  OLED_ShowString(0, 50, (u8 *)(motor_run > 0 ? "FWD " :
-                                (motor_run < 0 ? "BACK" : "STOP")));
-  OLED_ShowString(40, 50, (u8 *)"V");
-  OLED_ShowNumber(48, 50, (u32)spd_target, 3, 12);
   OLED_Refresh_Gram();
 }
 
@@ -351,6 +403,7 @@ static void cmd_help(USART_TypeDef *u)
   tx_puts(u, "S       : stop\r\n");
   tx_puts(u, "V<n>    : target speed counts/20ms, e.g. V120\r\n");
   tx_puts(u, "O<n>    : open-loop fixed PWM (diagnostic), e.g. O2500\r\n");
+  tx_puts(u, "G       : run straight 70 cm (button does the same)\r\n");
   tx_puts(u, "T / T-  : servos +90 / -90 deg (broadcast)\r\n");
   tx_puts(u, "C       : servos centre\r\n");
   tx_puts(u, "H / ?   : help\r\n");
@@ -387,6 +440,7 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
 
   if (c[0] == 'F')
   {
+    run_state = 0u;
     open_loop = 0u;
     motor_run = 1;
     speed_reset();
@@ -394,6 +448,7 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
   }
   else if (c[0] == 'B')
   {
+    run_state = 0u;
     open_loop = 0u;
     motor_run = -1;
     speed_reset();
@@ -401,6 +456,7 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
   }
   else if ((c[0] == 'S') || (c[0] == 'X'))
   {
+    run_state = 0u;
     open_loop = 0u;
     motor_run = 0;
     speed_reset();
@@ -442,6 +498,11 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
   {
     servo_broadcast_deg(0);
     tx_puts(u, "OK SERVO 0\r\n");
+  }
+  else if (c[0] == 'G')
+  {
+    run_start();
+    tx_puts(u, "OK 70CM START\r\n");
   }
   else if ((c[0] == 'H') || (c[0] == '?'))
   {
@@ -513,6 +574,9 @@ int main(void)
   cmd_help(USART3);
 
   servo_broadcast_deg(0);
+  run_target = (s32)((RUN_CM * 10.0f / (3.14159f * WHEEL_DIAMETER_MM)) * ENCODER_CPR);
+  run_state = 0u;
+  key_last = 0u;
   spd_target = SPD_DEFAULT;
   motor_run = 0;
   speed_reset();
@@ -537,6 +601,22 @@ int main(void)
     Laser_Poll();
     cmd_poll(&port1);
     cmd_poll(&port3);
+
+    /* USER key (PE0, active low): start the 70 cm straight run */
+    {
+      u8 k = (GPIO_ReadInputDataBit(GPIOE, GPIO_Pin_0) == Bit_RESET) ? 1u : 0u;
+      if ((k != 0u) && (key_last == 0u) && (run_state == 0u)) run_start();
+      key_last = k;
+    }
+
+    if ((run_state == 1u) && (run_counts >= run_target))
+    {
+      run_stop("70CM DONE");
+    }
+    if ((run_state == 1u) && ((ms_now() - run_start_ms) > RUN_TIMEOUT_MS))
+    {
+      run_stop("70CM TIMEOUT");
+    }
 
     if ((motor_run != 0) && ((ms_now() - last_cmd_ms) > CMD_TIMEOUT_MS))
     {
