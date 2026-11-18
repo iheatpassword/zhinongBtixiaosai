@@ -43,8 +43,9 @@
 /* ICM-20948 heading hold (onboard IMU, I2C) */
 #define GYRO_LSB_PER_DPS   65.5f
 #define GYRO_SIGN          (+1.0f)
-#define YAW_KP             2.0f     /* counts/20ms correction per degree   */
-#define YAW_CORR_MAX       80
+#define YAW_KP             6.0f     /* counts/20ms correction per degree   */
+#define YAW_KD             1.5f     /* yaw-rate damping                    */
+#define YAW_CORR_MAX       150
 #define KP_NUM             10       /* PWM = KP_NUM*err/10 + integral       */
 #define KI_DIV             8        /* integral += err/KI_DIV               */
 #define PWM_SLEW           400      /* max PWM change per 20 ms tick        */
@@ -69,6 +70,7 @@ static s16 spd_target;       /* counts per control period */
 static s16 spd_tgt[4];       /* per-wheel target (heading correction) */
 static float gyro_bias;
 static float yaw_deg;
+static int   yaw_corr;
 static u8  open_loop;        /* 1 = fixed PWM mode (diagnostic) */
 static s16 open_pwm;
 static u16 servo_angle;
@@ -322,9 +324,10 @@ static void speed_tick(void)
   {
     rate = gyro_z_dps() * GYRO_SIGN;
     yaw_deg += rate * 0.02f;
-    corr = (int)(YAW_KP * yaw_deg);
+    corr = (int)(YAW_KP * yaw_deg + YAW_KD * rate);
     if (corr > YAW_CORR_MAX)  corr = YAW_CORR_MAX;
     if (corr < -YAW_CORR_MAX) corr = -YAW_CORR_MAX;
+    yaw_corr = corr;
   }
 
   /* left wheels (FL, RL) slow down, right wheels speed up when yaw > 0 */
@@ -709,7 +712,11 @@ int main(void)
           tx_num(u, (int)pwm_out[w]);
           tx_putc(u, ' ');
         }
-        tx_puts(u, "SVO=");
+        tx_puts(u, "YAW=");
+        tx_num(u, (int)(yaw_deg * 10.0f));
+        tx_puts(u, " C=");
+        tx_num(u, yaw_corr);
+        tx_puts(u, " SVO=");
         tx_num(u, (int)servo_angle);
         tx_puts(u, " P=");
         tx_num(u, (int)last_port);
