@@ -882,6 +882,14 @@ int main(void)
         tx_num(u, (int)FSM_GetState());
         tx_puts(u, " LZ=");
         tx_puts(u, Laser_IsFresh() ? "OK " : "LOST ");
+        tx_puts(u, " LS=");
+        tx_num(u, (g_laser.dL == 0xFFFFu) ? -1 : (int)g_laser.dL);
+        tx_putc(u, ',');
+        tx_num(u, (g_laser.dR == 0xFFFFu) ? -1 : (int)g_laser.dR);
+        tx_putc(u, ',');
+        tx_num(u, (g_laser.dF == 0xFFFFu) ? -1 : (int)g_laser.dF);
+        tx_putc(u, ',');
+        tx_num(u, (int)g_laser.flags);
         tx_puts(u, " LZN=");
         tx_num(u, (int)g_laser.raw_count);
         tx_puts(u, " LB=");
