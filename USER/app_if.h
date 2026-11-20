@@ -60,8 +60,10 @@ void App_SetWheelSpeed(const s16 spd_tgt[4]);      /* speed-loop targets, FL,FR,
 void App_DriveStop(void);                          /* stop motors, reset PID        */
 void App_SetSteerAll(float deg);                   /* all 4 servos to same angle    */
 void App_SetSteerRotate(float deg, float rot);     /* front +deg*rot, rear -deg*rot */
+void App_SetSteer4(float fl, float fr, float rl, float rr); /* per-wheel angle, deg */
 void App_SetServoCenter(void);                     /* all servos 0 deg              */
 u16  App_GetDistanceCm(void);                      /* averaged odometry, cm         */
+u32  App_MsNow(void);                              /* 1 ms free-running timebase    */
 
 /* ======================================================================= */
 /*  Competition state machine                                              */
@@ -86,6 +88,7 @@ typedef struct
 } FsmInput;
 
 void     FSM_Init(void);
+void     FSM_Start(void);     /* begin the competition sequence (from ST_IDLE) */
 void     FSM_Tick(const FsmInput *in);
 CarState FSM_GetState(void);
 
