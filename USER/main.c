@@ -43,6 +43,8 @@
 #define RUN_CM             70.0f
 #define RUN_SPD            900      /* counts per 20 ms while running */
 #define RUN_TIMEOUT_MS     15000u
+#define CENT_TEST_SPD      600      /* centering test base speed counts/20ms */
+#define CENT_TEST_CM       150u     /* centering test distance, cm */
 
 /* ICM-20948 heading hold (onboard IMU, I2C) */
 #define GYRO_LSB_PER_DPS   65.5f
@@ -56,6 +58,7 @@
 #define PWM_FF             250      /* feed-forward base (dead zone)        */
 #define INTEG_MAX          10000
 #define PWM_LIM            12000
+#define SERVO_FAST_MS      150u    /* centering steering update time */
 #define CMD_TIMEOUT_MS     5000u
 
 #define SERVO_CENTER       500
@@ -96,6 +99,11 @@ static s32 integral[4];
 /* 70 cm straight-run test state */
 static u8  app_override;     /* 1 = spd_tgt supplied by App_SetWheelSpeed */
 static s32 odom_counts;      /* monotonic average encoder counts (odometry) */
+static u8  cent_mode;        /* 1 = centering straight test in progress */
+static u16 cent_lost_ticks;  /* consecutive 20 ms ticks without a fresh laser frame */
+static u8  cent_show;        /* 1 = show centering result on OLED */
+static u32 cent_start_ms;
+static u16 cent_base_cm;     /* odometry baseline at test start */
 static u8  run_state;        /* 0 idle, 1 running, 2 done */
 static s32 run_counts;       /* average encoder counts travelled */
 static s32 run_target;       /* counts for 70 cm */
@@ -445,6 +453,24 @@ static void screen(void)
   u8 i, y;
   s32 d01 = run_dist_01mm();
 
+  if ((cent_mode != 0u) || (cent_show != 0u))
+  {
+    OLED_Clear();
+    OLED_ShowString(0, 0, (u8 *)(cent_mode != 0u ? "CENTER RUNNING" : "CENTER RESULT"));
+    OLED_ShowString(0, 10, (u8 *)"E");
+    OLED_ShowNumber(16, 10, (u32)(g_centering.e_cm * 10.0f), 4, 12);
+    OLED_ShowString(64, 10, (u8 *)"0.1cm");
+    OLED_ShowString(0, 20, (u8 *)"D");
+    OLED_ShowNumber(16, 20, (u32)(g_centering.delta_deg * 10.0f), 4, 12);
+    OLED_ShowString(0, 30, (u8 *)"T");
+    OLED_ShowNumber(16, 30, (u32)(g_centering.toe_deg * 10.0f), 4, 12);
+    OLED_ShowString(0, 40, (u8 *)"DIST");
+    OLED_ShowNumber(40, 40, (u32)((u16)(App_GetDistanceCm() - cent_base_cm)), 4, 12);
+    OLED_ShowString(0, 50, (u8 *)(g_centering.saturated ? "SAT" : "   "));
+    OLED_Refresh_Gram();
+    return;
+  }
+
   OLED_Clear();
   OLED_ShowString(0, 0, (u8 *)"70cm STRAIGHT");
   OLED_ShowString(0, 10, (u8 *)(run_state == 0u ? "READY KEY/G" :
@@ -477,6 +503,7 @@ static void cmd_help(USART_TypeDef *u)
   tx_puts(u, "V<n>    : target speed counts/20ms, e.g. V120\r\n");
   tx_puts(u, "O<n>    : open-loop fixed PWM (diagnostic), e.g. O2500\r\n");
   tx_puts(u, "G       : run straight 70 cm (button does the same)\r\n");
+  tx_puts(u, "N       : centering straight test (2.5 m, needs laser)\r\n");
   tx_puts(u, "A       : start autonomous competition FSM\r\n");
   tx_puts(u, "Q       : abort FSM / reset to IDLE\r\n");
   tx_puts(u, "T / T-  : servos +90 / -90 deg (broadcast)\r\n");
@@ -524,6 +551,8 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
 
   if (c[0] == 'F')
   {
+    cent_show = 0u;
+    cent_mode = 0u;
     run_state = 0u;
     app_override = 0u;
     open_loop = 0u;
@@ -534,6 +563,8 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
   }
   else if (c[0] == 'B')
   {
+    cent_show = 0u;
+    cent_mode = 0u;
     run_state = 0u;
     app_override = 0u;
     open_loop = 0u;
@@ -544,6 +575,8 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
   }
   else if ((c[0] == 'S') || (c[0] == 'X'))
   {
+    cent_show = 0u;
+    cent_mode = 0u;
     run_state = 0u;
     app_override = 0u;
     open_loop = 0u;
@@ -590,16 +623,33 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
   }
   else if (c[0] == 'G')
   {
+    cent_mode = 0u;
     run_start();
     tx_puts(u, "OK 70CM START\r\n");
   }
+  else if (c[0] == 'N')
+  {
+    if (fsm_active() != 0u) { tx_puts(u, "ERR BUSY\r\n"); }
+    else
+    {
+      cent_mode = 1u;
+      cent_show = 0u;
+      cent_lost_ticks = 0u;
+      cent_start_ms = ms_now();
+      cent_base_cm = App_GetDistanceCm();
+      Centering_Init();
+      tx_puts(u, "OK CENT START\r\n");
+    }
+  }
   else if (c[0] == 'A')
   {
+    cent_mode = 0u;
     FSM_Start();
     tx_puts(u, "OK AUTO START\r\n");
   }
   else if (c[0] == 'Q')
   {
+    cent_mode = 0u;
     FSM_Init();
     App_DriveStop();
     tx_puts(u, "OK AUTO ABORT\r\n");
@@ -712,7 +762,7 @@ static void servo_set_deg(u8 id, float deg)
   if (units < 0.0f)    units = 0.0f;
   if (units > 1000.0f) units = 1000.0f;
   pos = (s16)units;
-  servo_move(id, (u16)pos, SERVO_MOVE_MS);
+  servo_move(id, (u16)pos, SERVO_FAST_MS);
 }
 
 void App_SetServoCenter(void)
@@ -814,6 +864,58 @@ int main(void)
         yaw_rate_dps = r;
         if ((motor_run != 0) || (fsm_active() != 0u)) yaw_deg += r * 0.02f;
 
+        if (cent_mode != 0u)
+        {
+          s16 cspd[4];
+          Centering_Update((const LaserData *)&g_laser, yaw_deg, r, CENT_TEST_SPD, cspd);
+          if (g_centering.valid == 0u)
+          {
+            cspd[0] = CENT_TEST_SPD; cspd[1] = CENT_TEST_SPD;
+            cspd[2] = CENT_TEST_SPD; cspd[3] = CENT_TEST_SPD;
+          }
+          App_SetWheelSpeed(cspd);
+          if ((u16)(App_GetDistanceCm() - cent_base_cm) >= CENT_TEST_CM)
+          {
+            cent_mode = 0u;
+            cent_show = 1u;
+            App_DriveStop();
+            tx_puts(USART1, "CENT DONE\r\n");
+            tx_puts(UART5,  "CENT DONE\r\n");
+          }
+          else if ((g_laser.dF != 0xFFFFu) && (g_laser.dF < 300u))
+          {
+            cent_mode = 0u;
+            cent_show = 1u;
+            App_DriveStop();
+            tx_puts(USART1, "CENT FRONT OBSTACLE\r\n");
+            tx_puts(UART5,  "CENT FRONT OBSTACLE\r\n");
+          }
+          else if ((ms_now() - cent_start_ms) > 40000u)
+          {
+            cent_mode = 0u;
+            cent_show = 1u;
+            App_DriveStop();
+            tx_puts(USART1, "CENT TIMEOUT\r\n");
+            tx_puts(UART5,  "CENT TIMEOUT\r\n");
+          }
+          else if (Laser_IsFresh() == 0u)
+          {
+            cent_lost_ticks++;
+            if (cent_lost_ticks > 25u)      /* 500 ms sustained loss */
+            {
+              cent_mode = 0u;
+              cent_show = 1u;
+              App_DriveStop();
+              tx_puts(USART1, "CENT LASER LOST\r\n");
+              tx_puts(UART5,  "CENT LASER LOST\r\n");
+            }
+          }
+          else
+          {
+            cent_lost_ticks = 0u;
+          }
+        }
+
         g_fsm_in.laser         = g_laser;   /* volatile struct copy */
         g_fsm_in.yaw_deg       = yaw_deg;
         g_fsm_in.yaw_rate_dps  = r;
@@ -832,7 +934,29 @@ int main(void)
     /* USER key (PE0, active low): start the 70 cm straight run */
     {
       u8 k = (GPIO_ReadInputDataBit(GPIOE, GPIO_Pin_0) == Bit_RESET) ? 1u : 0u;
-      if ((k != 0u) && (key_last == 0u) && (run_state == 0u)) run_start();
+      if ((k != 0u) && (key_last == 0u) && (run_state == 0u) && (cent_mode == 0u))
+      {
+        if (fsm_active() == 0u)
+        {
+          if ((Laser_IsFresh() != 0u) &&
+              (g_laser.dL != 0xFFFFu) && (g_laser.dR != 0xFFFFu))
+          {
+            cent_mode = 1u;
+            cent_show = 0u;
+            cent_lost_ticks = 0u;
+            cent_start_ms = ms_now();
+            cent_base_cm = App_GetDistanceCm();
+            Centering_Init();
+            tx_puts(USART1, "KEY CENT START\r\n");
+            tx_puts(UART5,  "KEY CENT START\r\n");
+          }
+          else
+          {
+            tx_puts(USART1, "KEY CENT: SIDE LASER INVALID\r\n");
+            tx_puts(UART5,  "KEY CENT: SIDE LASER INVALID\r\n");
+          }
+        }
+      }
       key_last = k;
     }
 
@@ -845,7 +969,8 @@ int main(void)
       run_stop("70CM TIMEOUT");
     }
 
-    if ((fsm_active() == 0u) && (motor_run != 0) && ((ms_now() - last_cmd_ms) > CMD_TIMEOUT_MS))
+    if ((cent_mode == 0u) && (fsm_active() == 0u) && (motor_run != 0) &&
+        ((ms_now() - last_cmd_ms) > CMD_TIMEOUT_MS))
     {
       motor_run = 0;
       speed_reset();
@@ -870,6 +995,12 @@ int main(void)
         if (open_loop != 0u) { tx_num(u, (int)open_pwm); tx_putc(u, ' '); }
         tx_puts(u, "tgt=");
         tx_num(u, (int)spd_target);
+        tx_puts(u, " MR=");
+        tx_num(u, (int)motor_run);
+        tx_puts(u, " CM=");
+        tx_num(u, (int)cent_mode);
+        tx_puts(u, " T0=");
+        tx_num(u, (int)spd_tgt[0]);
         tx_puts(u, " ");
         for (w = 0u; w < 4u; w++)
         {
@@ -878,7 +1009,13 @@ int main(void)
           tx_num(u, (int)pwm_out[w]);
           tx_putc(u, ' ');
         }
-        tx_puts(u, "ST=");
+        tx_puts(u, "CE=");
+        tx_num(u, (int)(g_centering.e_cm * 10.0f));
+        tx_puts(u, " CD=");
+        tx_num(u, (int)(g_centering.delta_deg * 10.0f));
+        tx_puts(u, " CT=");
+        tx_num(u, (int)(g_centering.toe_deg * 10.0f));
+        tx_puts(u, " ST=");
         tx_num(u, (int)FSM_GetState());
         tx_puts(u, " LZ=");
         tx_puts(u, Laser_IsFresh() ? "OK " : "LOST ");

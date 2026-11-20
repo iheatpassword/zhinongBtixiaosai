@@ -52,7 +52,7 @@
 #define CENTER_E_KD            0.20f  /* deg per (cm/s)                    */
 #define CENTER_E_I_MAX         1.50f  /* integrator clamp, deg             */
 #define CENTER_E_MAX_CM       20.00f  /* plausibility clamp on e, cm       */
-#define CENTER_DELTA_MAX       8.00f  /* hard steering clamp, deg          */
+#define CENTER_DELTA_MAX       15.00f /* hard steering clamp, deg (test)   */
 #define CENTER_DELTA_SLEW      2.50f  /* max change per 20 ms tick, deg    */
 
 /* ---- heading loop: yaw [deg] -> toe Delta [deg] ---------------------- */
@@ -61,7 +61,7 @@
 #define CENTER_YAW_KD          0.35f  /* deg toe per (deg/s) rate damping  */
 #define CENTER_YAW_I_MAX       2.00f  /* integrator clamp, deg             */
 #define CENTER_YAW_MAX_DEG    60.00f  /* yaw error clamp before the PID,deg*/
-#define CENTER_TOE_MAX         5.00f  /* hard toe clamp, deg               */
+#define CENTER_TOE_MAX         8.00f  /* hard toe clamp, deg (test)        */
 #define CENTER_TOE_SLEW        1.50f  /* max change per 20 ms tick, deg    */
 
 /* ---- misc ------------------------------------------------------------ */
@@ -92,11 +92,11 @@
 
 /* +1: a positive delta applied to App_SetSteer4() turns a wheel to the LEFT.
  *     Applies to all four wheels identically (crab steer must be parallel). */
-#define CENTER_STEER_SIGN      (+1.0f)
+#define CENTER_STEER_SIGN      (-1.0f)
 
 /* +1: (FL,FR)=+Delta and (RL,RR)=-Delta makes the car yaw LEFT.
  *     If the car yaws the wrong way on the first field test, use -1.0f. */
-#define CENTER_TOE_SIGN        (+1.0f)
+#define CENTER_TOE_SIGN        (-1.0f)
 
 /* ======================================================================= */
 /*  Debug snapshot for the Lead's 1 Hz log line (optional, read-only)      */
