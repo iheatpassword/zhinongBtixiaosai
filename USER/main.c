@@ -649,6 +649,13 @@ static u8 fsm_active(void)
   return ((st == ST_ENTRY) || (st == ST_RIDGE) || (st == ST_SHIFT) || (st == ST_EXIT)) ? 1u : 0u;
 }
 
+static void tx_hexb(USART_TypeDef *u, u8 v)
+{
+  const char *h = "0123456789ABCDEF";
+  tx_putc(u, (u8)h[v >> 4]);
+  tx_putc(u, (u8)h[v & 0x0Fu]);
+}
+
 /* ======================================================================= */
 /*  app_if.h hooks (used by the delegated modules: centering / fsm)        */
 /* ======================================================================= */
@@ -875,6 +882,17 @@ int main(void)
         tx_num(u, (int)FSM_GetState());
         tx_puts(u, " LZ=");
         tx_puts(u, Laser_IsFresh() ? "OK " : "LOST ");
+        tx_puts(u, " LZN=");
+        tx_num(u, (int)g_laser.raw_count);
+        tx_puts(u, " LB=");
+        {
+          u8 k2;
+          for (k2 = 0u; k2 < 8u; k2++)
+          {
+            tx_hexb(u, g_laser.raw_last[(u8)((g_laser.raw_idx + k2) & 7u)]);
+            tx_putc(u, ' ');
+          }
+        }
         tx_puts(u, "YAW=");
         tx_num(u, (int)(yaw_deg * 10.0f));
         tx_puts(u, " C=");
