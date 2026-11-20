@@ -1,31 +1,25 @@
 /**
   * @file    laser.h
-  * @brief   UART5 laser link (F103 -> C30D), with raw byte monitor
-  *          Expected frame: AA 55 | dL(2) dR(2) dF(2) | flags | CRC8
+  * @brief   Laser range finder link on UART4 (PC10 = TX, PC11 = RX, 115200 8N1).
+  *
+  *  The authoritative interface lives in USER/app_if.h:
+  *      extern volatile LaserData g_laser;
+  *      void Laser_Init(void);
+  *      void Laser_Poll(void);
+  *      u8   Laser_IsFresh(void);
+  *
+  *  Wire format (10 bytes, little endian distances in mm):
+  *      0xAA 0x55 | dL(2) dR(2) dF(2) | flags | CRC8
+  *      0xFFFF marks an invalid distance.
+  *      CRC8 polynomial 0x07, init 0x00, computed over
+  *      0xAA 0x55 + the 7 payload bytes.
+  *
+  *  This header deliberately does NOT define the LaserData struct; it comes
+  *  from app_if.h so that every module shares one definition.
   */
 #ifndef __LASER_H
 #define __LASER_H
 
-#include "system.h"
+#include "app_if.h"
 
-typedef struct
-{
-  u16 dL;
-  u16 dR;
-  u16 dF;
-  u8  flags;
-  u8  valid;
-  u32 last_ms;
-  /* raw monitor (for wiring / protocol debugging) */
-  u16 raw_count;      /* total bytes received on UART5                 */
-  u8  raw_last[8];    /* last 8 received bytes (rolling)               */
-  u8  raw_idx;
-} Laser_Data_t;
-
-extern volatile Laser_Data_t Laser;
-
-void Laser_Init(void);
-void Laser_Poll(void);        /* call every 5..10 ms */
-u8   LaserIsFresh(void);
-
-#endif
+#endif /* __LASER_H */

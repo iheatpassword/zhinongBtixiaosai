@@ -25,6 +25,10 @@
   * the FreeRTOS scheduler is NOT started.
   */
 #include "system.h"
+#include "app_if.h"
+#include "laser.h"
+#include "centering.h"
+#include "fsm.h"
 
 /* ----------------------------------------------------------------------- */
 /*  configuration                                                          */
@@ -61,6 +65,7 @@
 
 /* wheels: FL=0 FR=1 RL=2 RR=3 ; servos: FL=4 FR=3 RL=2 RR=1 */
 static const u8 WHEEL_MOTOR[4] = { 0u, 1u, 2u, 3u };
+static const u8 WHEEL_SERVO_ID[4] = { 4u, 3u, 2u, 1u };
 
 /* +1 / -1 : PWM sign used as "drive forward" for that wheel (calibrated) */
 static s8 motor_dir[4] = { -1, -1, 1, 1 };
@@ -70,7 +75,11 @@ static s16 spd_target;       /* counts per control period */
 static s16 spd_tgt[4];       /* per-wheel target (heading correction) */
 static float gyro_bias;
 static float yaw_deg;
+static float yaw_rate_dps;
 static int   yaw_corr;
+static FsmInput g_fsm_in;
+
+static u8 fsm_active(void);
 static u8  open_loop;        /* 1 = fixed PWM mode (diagnostic) */
 static s16 open_pwm;
 static u16 servo_angle;
@@ -85,6 +94,8 @@ static s16 pwm_out[4];
 static s32 integral[4];
 
 /* 70 cm straight-run test state */
+static u8  app_override;     /* 1 = spd_tgt supplied by App_SetWheelSpeed */
+static s32 odom_counts;      /* monotonic average encoder counts (odometry) */
 static u8  run_state;        /* 0 idle, 1 running, 2 done */
 static s32 run_counts;       /* average encoder counts travelled */
 static s32 run_target;       /* counts for 70 cm */
@@ -320,21 +331,23 @@ static void speed_tick(void)
   float rate;
   int corr = 0;
 
-  if (motor_run != 0)
+  if ((motor_run != 0) && (app_override == 0u))
   {
-    rate = gyro_z_dps() * GYRO_SIGN;
-    yaw_deg += rate * 0.02f;
+    rate = yaw_rate_dps;
     corr = (int)(YAW_KP * yaw_deg + YAW_KD * rate);
     if (corr > YAW_CORR_MAX)  corr = YAW_CORR_MAX;
     if (corr < -YAW_CORR_MAX) corr = -YAW_CORR_MAX;
     yaw_corr = corr;
   }
 
-  /* left wheels (FL, RL) slow down, right wheels speed up when yaw > 0 */
-  spd_tgt[0] = (s16)((int)spd_target - corr);
-  spd_tgt[1] = (s16)((int)spd_target + corr);
-  spd_tgt[2] = (s16)((int)spd_target - corr);
-  spd_tgt[3] = (s16)((int)spd_target + corr);
+  if (app_override == 0u)
+  {
+    /* left wheels (FL, RL) slow down, right wheels speed up when yaw > 0 */
+    spd_tgt[0] = (s16)((int)spd_target - corr);
+    spd_tgt[1] = (s16)((int)spd_target + corr);
+    spd_tgt[2] = (s16)((int)spd_target - corr);
+    spd_tgt[3] = (s16)((int)spd_target + corr);
+  }
 
   for (w = 0; w < 4u; w++)
   {
@@ -379,6 +392,7 @@ static void speed_tick(void)
 
     pwm_out[w] = (s16)p;
   }
+  if (motor_run != 0) odom_counts += (raw_sum / 4);
   if (run_state == 1u) run_counts += (raw_sum / 4);
   speed_apply();
 }
@@ -389,6 +403,7 @@ static void run_start(void)
   run_start_ms = ms_now();
   yaw_deg = 0.0f;
   run_state = 1u;
+  app_override = 0u;
   open_loop = 0u;
   motor_run = 1;
   spd_target = RUN_SPD;
@@ -458,6 +473,8 @@ static void cmd_help(USART_TypeDef *u)
   tx_puts(u, "V<n>    : target speed counts/20ms, e.g. V120\r\n");
   tx_puts(u, "O<n>    : open-loop fixed PWM (diagnostic), e.g. O2500\r\n");
   tx_puts(u, "G       : run straight 70 cm (button does the same)\r\n");
+  tx_puts(u, "A       : start autonomous competition FSM\r\n");
+  tx_puts(u, "Q       : abort FSM / reset to IDLE\r\n");
   tx_puts(u, "T / T-  : servos +90 / -90 deg (broadcast)\r\n");
   tx_puts(u, "C       : servos centre\r\n");
   tx_puts(u, "H / ?   : help\r\n");
@@ -487,6 +504,15 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
   c[i] = '\0';
   if (i == 0u) return;
 
+  /* movement commands are not allowed while the autonomous FSM is running */
+  if ((fsm_active() != 0u) &&
+      ((c[0] == 'F') || (c[0] == 'B') || (c[0] == 'S') ||
+       (c[0] == 'G') || (c[0] == 'V') || (c[0] == 'O')))
+  {
+    tx_puts(u, "ERR BUSY (RSM: A/Q)\r\n");
+    return;
+  }
+
   for (j = 0u; (j < 7u) && (c[j] != '\0'); j++) last_cmd[j] = c[j];
   last_cmd[j] = '\0';
   last_cmd_ms = ms_now();
@@ -495,6 +521,7 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
   if (c[0] == 'F')
   {
     run_state = 0u;
+    app_override = 0u;
     open_loop = 0u;
     motor_run = 1;
     yaw_deg = 0.0f;
@@ -504,6 +531,7 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
   else if (c[0] == 'B')
   {
     run_state = 0u;
+    app_override = 0u;
     open_loop = 0u;
     motor_run = -1;
     yaw_deg = 0.0f;
@@ -513,6 +541,7 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
   else if ((c[0] == 'S') || (c[0] == 'X'))
   {
     run_state = 0u;
+    app_override = 0u;
     open_loop = 0u;
     motor_run = 0;
     speed_reset();
@@ -560,6 +589,17 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
     run_start();
     tx_puts(u, "OK 70CM START\r\n");
   }
+  else if (c[0] == 'A')
+  {
+    FSM_Start();
+    tx_puts(u, "OK AUTO START\r\n");
+  }
+  else if (c[0] == 'Q')
+  {
+    FSM_Init();
+    App_DriveStop();
+    tx_puts(u, "OK AUTO ABORT\r\n");
+  }
   else if ((c[0] == 'H') || (c[0] == '?'))
   {
     cmd_help(u);
@@ -597,6 +637,103 @@ static void cmd_poll(CmdPort *p)
 }
 
 /* ======================================================================= */
+/*  FSM helpers                                                           */
+/* ======================================================================= */
+static u8 fsm_active(void)
+{
+  CarState st = FSM_GetState();
+  return ((st == ST_ENTRY) || (st == ST_RIDGE) || (st == ST_SHIFT) || (st == ST_EXIT)) ? 1u : 0u;
+}
+
+/* ======================================================================= */
+/*  app_if.h hooks (used by the delegated modules: centering / fsm)        */
+/* ======================================================================= */
+u32 App_MsNow(void)
+{
+  return ms_now();
+}
+
+void App_DriveStop(void)
+{
+  motor_run = 0;
+  app_override = 0u;
+  speed_reset();
+}
+
+void App_SetWheelSpeed(const s16 spd_tgt_in[4])
+{
+  u8 w;
+  int sum = 0;
+
+  for (w = 0u; w < 4u; w++)
+  {
+    spd_tgt[w] = spd_tgt_in[w];
+    sum += (int)spd_tgt_in[w];
+  }
+
+  if (sum > 0)
+  {
+    if (motor_run != 1) { speed_reset(); }
+    motor_run = 1;
+  }
+  else if (sum < 0)
+  {
+    if (motor_run != -1) { speed_reset(); }
+    motor_run = -1;
+  }
+  else
+  {
+    motor_run = 0;
+  }
+  app_override = 1u;
+}
+
+u16 App_GetDistanceCm(void)
+{
+  return (u16)((float)odom_counts * 3.14159f * WHEEL_DIAMETER_MM
+               / (10.0f * ENCODER_CPR));
+}
+
+static void servo_set_deg(u8 id, float deg)
+{
+  float units = (float)SERVO_CENTER + deg * SERVO_UNIT_PER_DEG;
+  s16 pos;
+  if (units < 0.0f)    units = 0.0f;
+  if (units > 1000.0f) units = 1000.0f;
+  pos = (s16)units;
+  servo_move(id, (u16)pos, SERVO_MOVE_MS);
+}
+
+void App_SetServoCenter(void)
+{
+  servo_broadcast_deg(0);
+}
+
+void App_SetSteerAll(float deg)
+{
+  servo_broadcast_deg((int)deg);
+}
+
+void App_SetSteerRotate(float deg, float rot)
+{
+  u8 w;
+  float d;
+  for (w = 0u; w < 4u; w++)
+  {
+    d = (w < 2u) ? (deg * rot) : (-deg * rot);
+    servo_set_deg(WHEEL_SERVO_ID[w], d);
+  }
+}
+
+void App_SetSteer4(float fl, float fr, float rl, float rr)
+{
+  servo_set_deg(WHEEL_SERVO_ID[0], fl);
+  servo_set_deg(WHEEL_SERVO_ID[1], fr);
+  servo_set_deg(WHEEL_SERVO_ID[2], rl);
+  servo_set_deg(WHEEL_SERVO_ID[3], rr);
+}
+
+/* ======================================================================= */
 /*  main                                                                  */
 /* ======================================================================= */
 int main(void)
@@ -612,9 +749,14 @@ int main(void)
 
   imu_init();
 
+  Laser_Init();
+
   uart2_init(115200u);
   NVIC_DisableIRQ(USART2_IRQn);
   NVIC_ClearPendingIRQ(USART2_IRQn);
+
+  Centering_Init();      /* needs USART2 servo bus ready */
+  FSM_Init();
 
   RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA1 | RCC_AHB1Periph_DMA2, ENABLE);
   NVIC_DisableIRQ(USART1_IRQn);
@@ -655,10 +797,23 @@ int main(void)
     {
       next_ctrl += CTRL_MS;
       if ((s32)(now - next_ctrl) > 200) next_ctrl = now + CTRL_MS;  /* catch up */
+
+      {
+        float r = gyro_z_dps() * GYRO_SIGN;
+        yaw_rate_dps = r;
+        if ((motor_run != 0) || (fsm_active() != 0u)) yaw_deg += r * 0.02f;
+
+        g_fsm_in.laser         = g_laser;   /* volatile struct copy */
+        g_fsm_in.yaw_deg       = yaw_deg;
+        g_fsm_in.yaw_rate_dps  = r;
+        g_fsm_in.ms            = ms_now();
+        FSM_Tick(&g_fsm_in);
+      }
       speed_tick();
     }
 
     delay_ms(5u);
+    Laser_Poll();
     cmd_poll(&port1);
     cmd_poll(&port3);
     cmd_poll(&port5);
@@ -679,7 +834,7 @@ int main(void)
       run_stop("70CM TIMEOUT");
     }
 
-    if ((motor_run != 0) && ((ms_now() - last_cmd_ms) > CMD_TIMEOUT_MS))
+    if ((fsm_active() == 0u) && (motor_run != 0) && ((ms_now() - last_cmd_ms) > CMD_TIMEOUT_MS))
     {
       motor_run = 0;
       speed_reset();
@@ -712,6 +867,10 @@ int main(void)
           tx_num(u, (int)pwm_out[w]);
           tx_putc(u, ' ');
         }
+        tx_puts(u, "ST=");
+        tx_num(u, (int)FSM_GetState());
+        tx_puts(u, " LZ=");
+        tx_puts(u, Laser_IsFresh() ? "OK " : "LOST ");
         tx_puts(u, "YAW=");
         tx_num(u, (int)(yaw_deg * 10.0f));
         tx_puts(u, " C=");
