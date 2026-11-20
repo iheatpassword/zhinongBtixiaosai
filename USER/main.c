@@ -359,6 +359,10 @@ static void speed_tick(void)
 
     if (motor_run == 0)
     {
+      /* keep the measured speed alive while stopped, so pushing the car by
+         hand / free-spinning a wheel shows up in the log (encoder health) */
+      meas_spd[w] = (s16)d;
+      prev_raw[w] = (s16)d;
       integral[w] = 0;
       pwm_out[w]  = 0;
       continue;

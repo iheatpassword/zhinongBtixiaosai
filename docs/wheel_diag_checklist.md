@@ -130,9 +130,11 @@ python tools\wheel_diag.py .\logs\o2500.log --include-open-loop
 - 每秒 1 行；`V900` 下 2 m 约 **11 行**（18 cm/s）。行数明显偏少 → 丢数据或没跑够 2 m；
 - 三个串口（USART1/3、UART5）会打印**同样内容**，只抓一个口；同时抓两个口会让行数/里程翻倍、yaw 漂移被低估一半，判定失真；
 - 最后的 `SPD STOP` 行工具自动排除，不用手工删；
+- 新固件在 `YAW=` 前多了 `ST=<0..6>`、`LZ=<OK|LOST>` 字段（顺序可变），工具已兼容；旧日志（无这两个字段）也能解析；
 - 若混入 `OL PWM=` 行，默认不参与判据（需要时加 `--include-open-loop`）；
 - 工具估算里程来自编码器；RL 少计数会让 2 m 被低估（可能 1.7–1.9 m）。**以卷尺实测为准**，差异本身就是编码器问题的证据；
 - 行间隔不是 1 s（抓包工具合并/丢行）时用 `--period-ms` 给实际平均间隔，否则 yaw 漂移会成比例失真。
+- 若某轮 PWM 顶到固件上限 **12000**（速度环饱和），该段数据不能用于「PWM 均衡」判定：先查轮子是否被卡住/悬空空转、编码器是否不计数；工具会统计并在 warnings 里给出饱和行数。
 
 ## 8. 用 wheel_diag.py 出结论
 
@@ -150,7 +152,10 @@ python tools\wheel_diag.py .\logs\run2m_20261121_01.log --json | Out-File -Encod
 # 带开环 O 测试对比
 python tools\wheel_diag.py .\logs\run2m_20261121_01.log --include-open-loop
 
-# 工具自检（35 项，应全部 PASS）
+# 逐行明细（每行 PWM/速度/YAW/ST/LZ + 里程累计 + 总里程/可用行汇总）
+python tools\wheel_diag.py .\logs\run2m_20261121_01.log --verbose
+
+# 工具自检（45 项，应全部 PASS）
 python tools\wheel_diag.py --selftest
 ```
 
@@ -175,6 +180,7 @@ python tools\wheel_diag.py --selftest
 - `--ref-wheel mean|FL|FR|RL|RR`：里程用哪个轮估算，默认四轮平均；`--ref-wheel RL` 可量化 RL 少计数对里程的影响（两次里程差 ≈ RL 少计比例）；
 - `--direction fwd|back`：只分析一个方向（日志混了 F/B 时用）；
 - `--include-open-loop`：附带 O 测试等 PWM 速度对比（不参与 PASS/FAIL）；
+- `--verbose`：打印逐行明细表（四轮速度/PWM、YAW、C、ST、LZ、每行里程与累计里程）以及总里程/可用行数汇总；
 - `--pwm-limit` / `--yaw-limit`：自定义阈值（默认 20 / 2.0）。
 
 ## 9. 数据记录表（每次试验一行）

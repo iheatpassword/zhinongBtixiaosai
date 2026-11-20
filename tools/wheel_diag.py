@@ -14,7 +14,12 @@ per port) and reports:
 
 Firmware log format (USER/main.c, one line per second per port):
 
-  SPD FWD tgt=900 1007/3278 926/3784 428/4335 998/3418 YAW=-2 C=0 SVO=0 P=5 CMD=G
+  pre-Sprint-1:
+    SPD FWD tgt=900 1007/3278 926/3784 428/4335 998/3418 YAW=-2 C=0 SVO=0 P=5 CMD=G
+  Sprint-1 integration (optional ST=<0..6> and LZ=<OK|LOST> before YAW,
+  in either order -- such tokens are parsed but do not change the maths):
+    SPD FWD tgt=900 124/3200 163/3200 193/3200 148/3200 ST=0 LZ=LOST YAW=0 C=0 SVO=0 P=5 CMD=F
+
   field order: FL FR RL RR, each "measured_speed/pwm"; YAW is 0.1 deg units.
 
 Distance model (matches README: ENCODER_CPR = 60000, effective wheel diameter
@@ -24,7 +29,7 @@ Distance model (matches README: ENCODER_CPR = 60000, effective wheel diameter
   distance_cm  = measured_speed * 50 * (period_ms / 1000) / 60000 * pi * 7.64
 
 Usage:
-  python tools/wheel_diag.py LOGFILE [--period-ms 1000] [--json]
+  python tools/wheel_diag.py LOGFILE [--period-ms 1000] [--json] [--verbose]
   python tools/wheel_diag.py --selftest
 
 Exit codes: 0 = both verdicts PASS, 1 = FAIL / not enough data, 2 = usage error.
@@ -48,7 +53,7 @@ import tempfile
 from dataclasses import dataclass
 
 TOOL_NAME = "wheel_diag"
-TOOL_VERSION = "1.0"
+TOOL_VERSION = "1.1"
 
 WHEELS = ("FL", "FR", "RL", "RR")
 # C30D wiring, see README.md section 1
@@ -66,6 +71,8 @@ MIN_DISTANCE_M = 0.05  # below this a "deg per metre" number is meaningless
 
 PWM_SPREAD_LIMIT_PCT = 20.0
 YAW_DRIFT_LIMIT_DEG_PER_M = 2.0
+PWM_LIM_FIRMWARE = 12000  # USER/main.c PWM_LIM: saturation means "can't keep up"
+PWM_SATURATED_FRACTION = 0.98
 EPS = 1e-9
 
 # PWM feed-forward model from USER/main.c: pwm ~= 2.5 * target + 250.
@@ -77,6 +84,11 @@ FF_PWM_PER_SPEED = 2.5
 # log parsing
 # ---------------------------------------------------------------------------
 
+# Head of a log line: mode, target, and the four "speed/pwm" pairs.  The
+# remainder (YAW=, C=, SVO=, P=, CMD=, plus optional ST= / LZ= diagnostic
+# tokens in any order) is tokenised separately, so old captures (no ST/LZ)
+# and Sprint-1 captures (with ST/LZ) both parse, and future fields do not
+# break the tool.
 _LINE_RE = re.compile(
     r"(?P<mode>SPD\s+(?P<dir>FWD|BACK|STOP)|OL\s+PWM=(?P<olpwm>-?\d+))"
     r"\s+tgt=(?P<tgt>-?\d+)"
@@ -84,12 +96,12 @@ _LINE_RE = re.compile(
     r"\s+(?P<fr_m>-?\d+)/(?P<fr_pwm>-?\d+)"
     r"\s+(?P<rl_m>-?\d+)/(?P<rl_pwm>-?\d+)"
     r"\s+(?P<rr_m>-?\d+)/(?P<rr_pwm>-?\d+)"
-    r"\s+YAW=(?P<yaw>-?\d+)"
-    r"\s+C=(?P<corr>-?\d+)"
-    r"\s+SVO=(?P<servo>-?\d+)"
-    r"\s+P=(?P<port>-?\d+)"
-    r"\s+CMD=(?P<cmd>\S*)"
+    r"(?P<tail>.*)$"
 )
+
+# "KEY=value" tokens in the tail of a log line (value may be empty, e.g. a
+# bare "CMD=" before the first command).
+_TAIL_TOKEN_RE = re.compile(r"([A-Za-z]+)=(\S*)")
 
 
 @dataclass
@@ -107,6 +119,8 @@ class Record:
     port: int
     cmd: str
     open_pwm: int | None = None
+    st: int | None = None  # Sprint-1 ST=<0..6> state field (None on old logs)
+    lz: str | None = None  # Sprint-1 LZ=<OK|LOST> laser status (None on old logs)
 
 
 @dataclass
@@ -136,7 +150,12 @@ def decode_log(raw):
 
 
 def parse_line(line, lineno=0):
-    """Parse one line; returns Record or None."""
+    """Parse one line; returns Record or None.
+
+    Accepts both the pre-Sprint-1 format (no ST/LZ) and the Sprint-1 format
+    with optional "ST=<n>" and "LZ=<OK|LOST>" tokens in either order between
+    the last wheel pair and YAW=.  Unknown extra KEY=value tokens are ignored.
+    """
     m = _LINE_RE.search(line)
     if m is None:
         return None
@@ -145,6 +164,31 @@ def parse_line(line, lineno=0):
     if direction is None:  # OL PWM=<n>
         direction = "OL"
         open_pwm = int(m.group("olpwm"))
+
+    fields = {}
+    for token in _TAIL_TOKEN_RE.finditer(m.group("tail")):
+        fields[token.group(1).upper()] = token.group(2)
+    try:
+        yaw_raw = int(fields["YAW"])
+        corr = int(fields["C"])
+        servo = int(fields["SVO"])
+        port = int(fields["P"])
+    except (KeyError, ValueError):
+        return None
+    cmd = fields.get("CMD")
+    if cmd is None:
+        return None
+
+    st = None
+    if "ST" in fields:
+        try:
+            st = int(fields["ST"])
+        except ValueError:
+            st = None
+    lz = fields.get("LZ")
+    if lz is not None:
+        lz = lz.upper()
+
     return Record(
         lineno=lineno,
         kind=direction,
@@ -161,12 +205,14 @@ def parse_line(line, lineno=0):
             int(m.group("rl_pwm")),
             int(m.group("rr_pwm")),
         ),
-        yaw_raw=int(m.group("yaw")),
-        corr=int(m.group("corr")),
-        servo=int(m.group("servo")),
-        port=int(m.group("port")),
-        cmd=m.group("cmd"),
+        yaw_raw=yaw_raw,
+        corr=corr,
+        servo=servo,
+        port=port,
+        cmd=cmd,
         open_pwm=open_pwm,
+        st=st,
+        lz=lz,
     )
 
 
@@ -263,7 +309,7 @@ def yaw_verdict(rate_deg_per_m, limit=YAW_DRIFT_LIMIT_DEG_PER_M):
 def analyze(parse_result, source="<log>", period_ms=1000.0, ref_wheel="mean",
             direction="any", include_open_loop=False,
             pwm_limit=PWM_SPREAD_LIMIT_PCT,
-            yaw_limit=YAW_DRIFT_LIMIT_DEG_PER_M):
+            yaw_limit=YAW_DRIFT_LIMIT_DEG_PER_M, verbose=False):
     """Turn parsed records into a result dict (text / JSON share it)."""
     period_ms = float(period_ms)
     if period_ms <= 0:
@@ -414,6 +460,14 @@ def analyze(parse_result, source="<log>", period_ms=1000.0, ref_wheel="mean",
             warnings.append(
                 "%d line(s) report zero speed on all wheels (car not moving); they "
                 "dilute the distance estimate" % zero_lines)
+        sat_lines = sum(1 for r in usable
+                        if max(r.pwms) >= PWM_LIM_FIRMWARE * PWM_SATURATED_FRACTION)
+        if sat_lines:
+            warnings.append(
+                "%d line(s) have a wheel PWM at/near the %d firmware limit -- the "
+                "speed loop is saturated (wheel blocked/stalled, or encoder not "
+                "counting); their PWM comparison is not meaningful"
+                % (sat_lines, PWM_LIM_FIRMWARE))
         for row in wheel_rows:
             rel = row["speed_rel_median_pct"]
             if rel is not None and abs(rel) >= 20.0:
@@ -462,6 +516,25 @@ def analyze(parse_result, source="<log>", period_ms=1000.0, ref_wheel="mean",
     elif include_open_loop:
         open_loop_info = {"groups": []}
 
+    # --- optional per-line detail (--verbose) ------------------------------
+    detail = None
+    if verbose:
+        detail = []
+        for idx, rec in enumerate(usable):
+            detail.append({
+                "line": rec.lineno,
+                "kind": rec.kind,
+                "tgt": rec.tgt,
+                "speeds": list(rec.speeds),
+                "pwms": list(rec.pwms),
+                "yaw_deg": _round(rec.yaw_raw / 10.0, 1),
+                "corr": rec.corr,
+                "st": rec.st,
+                "lz": rec.lz,
+                "dist_cm": _round(per_line_cm[idx], 2),
+                "cum_m": _round(xs[idx], 4),
+            })
+
     return {
         "tool": TOOL_NAME,
         "version": TOOL_VERSION,
@@ -472,6 +545,7 @@ def analyze(parse_result, source="<log>", period_ms=1000.0, ref_wheel="mean",
             "ref_wheel": ref_wheel,
             "direction": direction,
             "include_open_loop": bool(include_open_loop),
+            "verbose": bool(verbose),
             "pwm_limit_pct": pwm_limit,
             "yaw_limit_deg_per_m": yaw_limit,
         },
@@ -492,6 +566,9 @@ def analyze(parse_result, source="<log>", period_ms=1000.0, ref_wheel="mean",
             "corr_mean_abs": _round(corr_mean_abs, 2),
             "zero_speed_lines": sum(
                 1 for r in usable if all(s == 0 for s in r.speeds)),
+            "saturated_lines": sum(
+                1 for r in usable
+                if max(r.pwms) >= PWM_LIM_FIRMWARE * PWM_SATURATED_FRACTION),
         },
         "distance": {
             "total_m": _round(total_m, 4),
@@ -522,6 +599,7 @@ def analyze(parse_result, source="<log>", period_ms=1000.0, ref_wheel="mean",
             "verdict": yaw_v,
         },
         "open_loop": open_loop_info,
+        "detail": detail,
         "verdicts": {
             "pwm": pwm_v,
             "yaw": yaw_v,
@@ -534,7 +612,7 @@ def analyze(parse_result, source="<log>", period_ms=1000.0, ref_wheel="mean",
 
 def analyze_log(path, period_ms=1000.0, ref_wheel="mean", direction="any",
                 include_open_loop=False, pwm_limit=PWM_SPREAD_LIMIT_PCT,
-                yaw_limit=YAW_DRIFT_LIMIT_DEG_PER_M):
+                yaw_limit=YAW_DRIFT_LIMIT_DEG_PER_M, verbose=False):
     """Convenience wrapper: parse path then analyze."""
     return analyze(
         parse_log(path),
@@ -545,6 +623,7 @@ def analyze_log(path, period_ms=1000.0, ref_wheel="mean", direction="any",
         include_open_loop=include_open_loop,
         pwm_limit=pwm_limit,
         yaw_limit=yaw_limit,
+        verbose=verbose,
     )
 
 
@@ -635,6 +714,38 @@ def format_text(result):
                _fmt(yaw["regression_slope_deg_per_m"], 2),
                _fmt(yaw["peak_segment_deg_per_m"], 2)))
 
+    detail = result.get("detail")
+    if detail:
+        add("-" * 72)
+        add(" per-line detail -- %d usable line(s), travel %.2f m, %.1f s:"
+            % (len(detail), dist["total_m"], run["duration_s"]))
+        add("   %-3s %-4s %4s  %-19s %-23s %6s %3s %3s %-5s %8s %7s"
+            % ("#", "kind", "tgt", "FL/FR/RL/RR speed", "FL/FR/RL/RR pwm",
+               "YAW", "C", "ST", "LZ", "dist_cm", "cum_m"))
+        st_counts = {}
+        lz_counts = {}
+        for row in detail:
+            speeds = "/".join(str(v) for v in row["speeds"])
+            pwms = "/".join(str(v) for v in row["pwms"])
+            add("   %-3d %-4s %4d  %-19s %-23s %+6.1f %3d %3s %-5s %8.2f %7.3f"
+                % (row["line"], row["kind"], row["tgt"], speeds, pwms,
+                   row["yaw_deg"], row["corr"], _fmt(row["st"], 0),
+                   row["lz"] if row["lz"] else "-",
+                   row["dist_cm"], row["cum_m"]))
+            st_key = "-" if row["st"] is None else str(row["st"])
+            st_counts[st_key] = st_counts.get(st_key, 0) + 1
+            lz_key = row["lz"] if row["lz"] else "-"
+            lz_counts[lz_key] = lz_counts.get(lz_key, 0) + 1
+        add("   summary: usable=%d line(s), total travel=%.2f m, duration=%.1f s, "
+            "period=%.0f ms"
+            % (len(detail), dist["total_m"], run["duration_s"],
+               params["period_ms"]))
+        add("   fields : ST: %s ; LZ: %s"
+            % (", ".join("%s x%d" % (k, v)
+                         for k, v in sorted(st_counts.items())),
+               ", ".join("%s x%d" % (k, v)
+                         for k, v in sorted(lz_counts.items()))))
+
     olinfo = result.get("open_loop")
     if olinfo and olinfo["groups"]:
         add("-" * 72)
@@ -672,11 +783,27 @@ SPD FWD tgt=900 914/2207 938/2478 835/5238 927/2314 YAW=-12 C=-2 SVO=0 P=5 CMD=G
 SPD FWD tgt=900 929/1864 955/2034 947/5499 885/1959 YAW=-18 C=-3 SVO=0 P=5 CMD=G
 """
 
+# Sprint-1 firmware adds "ST=<state> LZ=<OK|LOST>" before YAW (real COM18
+# capture, wheels barely moving at max PWM -- kept verbatim as a parser case).
+NEW_SAMPLE = (
+    "SPD FWD tgt=900 124/3200 163/3200 193/3200 148/3200 "
+    "ST=0 LZ=LOST YAW=0 C=0 SVO=0 P=5 CMD=F"
+)
+
 
 def _spd_line(direction, speeds, pwms, yaw_raw, tgt=900, corr=0, cmd="G"):
     pairs = " ".join("%d/%d" % (speed, pwm) for speed, pwm in zip(speeds, pwms))
     return ("SPD %s tgt=%d %s YAW=%d C=%d SVO=0 P=5 CMD=%s"
             % (direction, tgt, pairs, yaw_raw, corr, cmd))
+
+
+def _spd_line_new(direction, speeds, pwms, yaw_raw, tgt=900, corr=0, cmd="F",
+                  st=0, lz="OK", lz_first=False):
+    """Sprint-1 format: optional ST=/LZ= tokens in either order before YAW."""
+    pairs = " ".join("%d/%d" % (speed, pwm) for speed, pwm in zip(speeds, pwms))
+    fields = ("LZ=%s ST=%s" % (lz, st)) if lz_first else ("ST=%s LZ=%s" % (st, lz))
+    return ("SPD %s tgt=%d %s %s YAW=%d C=%d SVO=0 P=5 CMD=%s"
+            % (direction, tgt, pairs, fields, yaw_raw, corr, cmd))
 
 
 def _ol_line(open_pwm, speeds, yaw_raw=0):
@@ -793,6 +920,79 @@ def run_selftest(stream=None):
             "FL=%r RL=%r" % (rb["wheels"][0]["pwm_per_speed"],
                              rb["wheels"][2]["pwm_per_speed"]))
 
+        # 1b. Sprint-1 format with optional ST= / LZ= tokens -----------------
+        rec_new = parse_line(NEW_SAMPLE)
+        checker.check(
+            "new format (real sample): ST/LZ parsed, numeric fields intact",
+            rec_new is not None and rec_new.st == 0 and rec_new.lz == "LOST"
+            and rec_new.speeds == (124, 163, 193, 148)
+            and rec_new.pwms == (3200, 3200, 3200, 3200)
+            and rec_new.yaw_raw == 0 and rec_new.kind == "FWD",
+            "rec=%r" % (rec_new,))
+        rec_old = parse_line(BROKEN_SAMPLE.splitlines()[0])
+        checker.check(
+            "old format (no ST/LZ) still parses, ST/LZ = None",
+            rec_old is not None and rec_old.st is None and rec_old.lz is None
+            and rec_old.speeds == (1007, 926, 428, 998),
+            "rec=%r" % (rec_old,))
+        rec_swapped = parse_line(_spd_line_new(
+            "FWD", (900, 901, 902, 903), (2500, 2501, 2502, 2503), 3,
+            st=2, lz="OK", lz_first=True))
+        checker.check(
+            "new format: LZ before ST (either order) parses",
+            rec_swapped is not None and rec_swapped.st == 2
+            and rec_swapped.lz == "OK" and rec_swapped.yaw_raw == 3,
+            "rec=%r" % (rec_swapped,))
+        rec_extra = parse_line(NEW_SAMPLE.replace("ST=0", "ST=0 XX=7"))
+        checker.check(
+            "new format: unknown extra KEY=value token ignored",
+            rec_extra is not None and rec_extra.st == 0
+            and rec_extra.lz == "LOST",
+            "rec=%r" % (rec_extra,))
+        new_text = "\n".join([
+            NEW_SAMPLE,
+            _spd_line_new("FWD", (900, 905, 910, 908),
+                          (2495, 2505, 2510, 2500), 1),
+            _spd_line_new("FWD", (902, 903, 909, 906),
+                          (2495, 2505, 2510, 2500), 2),
+        ]) + "\n"
+        r_new = analyze_log(write("new_format.log", new_text))
+        checker.check(
+            "new-format log: 3 usable lines, PASS/PASS",
+            r_new["lines"]["usable"] == 3
+            and r_new["verdicts"]["pwm"] == "PASS"
+            and r_new["verdicts"]["yaw"] == "PASS",
+            "%r %r" % (r_new["lines"], r_new["verdicts"]))
+        r_mixed = analyze_log(write("mixed_format.log", BROKEN_SAMPLE + new_text))
+        checker.check(
+            "mixed old+new format log: all 6 FWD lines parsed, 0 malformed",
+            r_mixed["lines"]["usable"] == 6
+            and r_mixed["lines"]["malformed"] == 0,
+            "lines=%r" % (r_mixed["lines"],))
+        trunc_new = write(
+            "trunc_new.log",
+            _spd_line_new("FWD", (900, 900, 900, 900), (2500,) * 4, 0)
+            .split(" YAW=")[0] + "\n")
+        r_trunc_new = analyze_log(trunc_new)
+        checker.check(
+            "truncated new-format line (no YAW) counted malformed",
+            r_trunc_new["lines"]["usable"] == 0
+            and r_trunc_new["lines"]["malformed"] == 1,
+            "lines=%r" % (r_trunc_new["lines"],))
+        sat_text = "\n".join([
+            _spd_line_new("FWD", (900, 905, 910, 908),
+                          (12000, 2505, 2510, 2500), 0),
+            _spd_line_new("FWD", (902, 903, 909, 906),
+                          (12000, 2505, 2510, 2500), 1),
+        ]) + "\n"
+        r_sat = analyze_log(write("sat.log", sat_text))
+        checker.check(
+            "saturated PWM (12000) is counted and warned",
+            r_sat["run"]["saturated_lines"] == 2
+            and any("firmware limit" in w for w in r_sat["warnings"]),
+            "sat=%r warnings=%r" % (r_sat["run"]["saturated_lines"],
+                                    r_sat["warnings"]))
+
         # 2. healthy 2 m run -------------------------------------------------
         healthy_text = _healthy_log()
         healthy = write("healthy.log", healthy_text)
@@ -832,6 +1032,21 @@ def run_selftest(stream=None):
             and r_strict["yaw"]["verdict"] == "FAIL",
             "%r suspect=%r" % (r_strict["verdicts"],
                               r_strict["pwm"]["suspect_wheel"]))
+        rv = analyze_log(healthy, verbose=True)
+        detail = rv.get("detail") or []
+        checker.check(
+            "verbose: per-line detail for every usable line (ST/LZ None on old log)",
+            rv["params"]["verbose"] is True and len(detail) == 11
+            and detail[0]["line"] == 1 and detail[0]["st"] is None
+            and detail[0]["lz"] is None
+            and _approx(detail[-1]["cum_m"], rv["distance"]["total_m"], 1e-6),
+            "detail=%d" % len(detail))
+        vtext = format_text(rv)
+        checker.check(
+            "verbose text: per-line table + travel/usable summary",
+            "per-line detail" in vtext and "summary: usable=11" in vtext
+            and "total travel=" in vtext,
+            vtext[:120])
 
         # 3. STOP lines must be ignored -------------------------------------
         healthy_lines = healthy_text.splitlines()
@@ -1051,6 +1266,9 @@ def build_arg_parser():
                         help="which SPD lines to analyse (default: any)")
     parser.add_argument("--include-open-loop", action="store_true",
                         help="also report informational O<n> open-loop comparison")
+    parser.add_argument("--verbose", action="store_true",
+                        help="print per-line detail (speed/pwm/YAW/ST/LZ, "
+                             "line distance) plus travel summary")
     parser.add_argument("--pwm-limit", type=float, default=PWM_SPREAD_LIMIT_PCT,
                         metavar="PCT", help="PWM spread limit in %% (default: 20)")
     parser.add_argument("--yaw-limit", type=float,
@@ -1081,6 +1299,7 @@ def run(argv=None):
             include_open_loop=args.include_open_loop,
             pwm_limit=args.pwm_limit,
             yaw_limit=args.yaw_limit,
+            verbose=args.verbose,
         )
     except OSError as exc:
         print("wheel_diag: error: cannot read %s: %s" % (args.logfile, exc),
