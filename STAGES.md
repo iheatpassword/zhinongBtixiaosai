@@ -1,111 +1,68 @@
-﻿# 鍒嗛樁娈靛疄鏂借鍒掞紙鍙獙璇?/ 鍙洖婊氾級
+# 分阶段实施计划（可验证 / 可回滚）
 
-姣忎釜闃舵 = 涓€涓?git tag + 涓€娆＄儳褰曢獙璇侊紱楠岃瘉涓嶉€氳繃灏?`git checkout <涓婁竴涓?tag>` 閲嶆柊缂栬瘧鐑у綍鍥炴粴銆?鎵€鏈夐樁娈甸兘鍦?`main` 鍒嗘敮涓婃寜椤哄簭鎺ㄨ繘锛岃繙绋嬪浠戒粨搴?`c30d-motor-test`锛?92.168.1.1锛夈€?
-## 闃舵鎬昏
+每个阶段 = 一个 git tag + 一次实车/台架验证；验证不通过就 `git checkout <上一个 tag>` 重新编译烧录回滚。
+所有阶段在 `main` 分支上顺序推进，远程备份仓库 `c30d-motor-test`（ZeroTier `10.206.159.40`，局域网时用 `192.168.1.1`）。
 
-| 闃舵 | tag | 鍐呭 | 楠岃瘉鏍囧噯 | 鍥炴粴 |
+## 阶段总览
+
+| 阶段 | tag | 内容 | 验证标准 | 当前状态 |
 |---|---|---|---|---|
-| S0 | `v0.1-baseline` | 杞叮瀹樻柟婧愮爜 + 鐩磋/鍘熷湴90掳婕旂ず锛堝凡鐑у綍楠岃瘉锛?| 杞﹁兘鐩磋銆佽兘鍘熷湴杞?0掳 | 鈥?|
-| S1 | `v0.2-laser-link` | UART5 + DMA 鎺ユ敹 3 璺縺鍏夋暟鎹抚銆佽В鏋?婊ゆ尝/瓒呮椂銆丱LED 涓庝覆鍙ｆ樉绀猴紱**杩愬姩閫昏緫涓嶅彉** | 鍙戞ā鎷熷抚/鎺?F103 鍚庡睆骞曟樉绀?L/R/F 鏁板€煎拰鏈夋晥鏍囧織锛涚洿琛?杞?0掳涓庡熀绾垮畬鍏ㄤ竴鑷?| `git checkout v0.1-baseline` |
-| S2 | `v0.3-centering` | 鐩磋瀵逛腑闂幆锛毼达紙鍥涜疆鍚屽悜锛夌籂妯悜銆佄旓紙鍓嶅悗鍙嶅悜锛夌籂鑸悜銆佺紪鐮佸櫒閫熷害鐜?| 鍦ㄥ瀯涓婄洿琛?2~3 m锛屽乏鍙冲亸宸?鈮ぢ? cm锛屼笉纰板瀯锛涘仠杞?鎬ュ仠姝ｅ父 | `git checkout v0.2-laser-link` |
-| S3 | `v0.4-lane-shift` | 绔儴妯Щ鎹㈠瀯锛氬洓鑸垫満 90掳銆佺紪鐮佸櫒 70 cm 璁＄▼銆佹縺鍏夌簿瀵逛腑 | 杩炵画鎹㈠瀯 5 娆★紝姣忔瀵逛腑鍋忓樊 鈮ぢ? cm锛涜酱璺?閫氶亾涓嶅共娑?| `git checkout v0.3-centering` |
-| S4 | `v0.5-fsm` | 姣旇禌鐘舵€佹満锛氳繘鍦衡啋6 鍨勮泧褰⑩啋鍑哄満鈫掑惎鍔ㄥ尯鍋滆溅 | 鍏ㄦ祦绋嬬┖璺戜竴閬嶏紝涓嶇鍥存爮/鍨勶紝5 min 鍐呭畬鎴?| `git checkout v0.4-lane-shift` |
-| S5 | `v0.6-robust` | 瀹夊叏/鎵撴粦妫€娴嬨€佸弬鏁版帀鐢典繚瀛樸€侀€熷害涓庢椂闂翠紭鍖?| 鍦版璺涓嶆墦婊戣窇鍋忋€佹縺鍏夋嫈绾?100ms 鍐呭仠杞︺€侀噸鍚弬鏁颁繚鎸?| `git checkout v0.5-fsm` |
+| S0 | `v0.1-baseline` | 官方源码 + 直行/原地 90° 演示 | 车能直行、能原地转 90° | ✅ 完成 |
+| S1 | `v0.2-laser-link`（计划）/ `v0.3.2-laser-mon`（已做） | 激光链路：UART4（原计划 UART5）+ DMA 接收 3 路激光帧、解析/滤波/超时、显示 | 收到有效帧；拔线 100 ms 内判失效；运动逻辑不回归 | ⚠️ 阻塞（F103 接线未通，接口改到 UART4） |
+| S2 | `v0.3-centering` | 对中直行：δ（四轮同向纠横向）+ Δ（前后反向纠航向）+ 编码器速度环 + IMU 航向 | 跨垄直行 2~3 m 侧向偏差 ≤±3 cm，不碰垄；激光失效 100 ms 内停车 | 🟡 35%（速度环/70cm/IMU 已完成，横向对中未开始） |
+| S3 | `v0.4-lane-shift` | 端部横移换垄：四舵机 90°、编码器 70 cm 计程、激光精对中 | 连续换垄 5 次，每次对中误差 ≤±2 cm；轴距/通道不干涉 | 🔴 未开始 |
+| S4 | `v0.5-fsm` | 比赛状态机：进场→6 垄蛇形→出场→启动区停车 | 全流程空跑，不碰围栏/垄，5 min 内完成 | 🔴 未开始 |
+| S5 | `v0.6-robust` | 安全/打滑检测、参数掉电保存、速度与时间优化 | 地毯路段不跑偏、激光拔线 100 ms 内停车、重启参数保持 | 🔴 未开始 |
 
-## 姣忛樁娈靛伐浣滄祦
+## 串口分配（2026-11-20 调整）
+
+| 链路 | 外设 | 引脚 | 说明 |
+|---|---|---|---|
+| 3 路激光（F103） | **UART4** | PC10=TX / PC11=RX | 原方案为 UART5；UART5 现已作无线调试指令口 |
+| 无线调试/指令 | UART5 | PC12=TX / PD2=RX | 与 USART1/USART3 三路并存 |
+| 板载调试 | USART1 | PA9/PA10 | Type-C 串口1 |
+| 备用 | USART3 | PD8/PD9 | Type-C 串口3 |
+| 总线舵机 | USART2 | PD5/PD6 | BusLinker + 4×HTS-35H |
+| 板载 IMU | I2C | PB10/PB11 | ICM-20948 |
+
+## 每阶段工作流
 
 ```powershell
 Set-Location 'C:\Users\iheat\Desktop\smart wheels2\C30D_MotorTest'
 git add -A
-git commit -m "S1: laser UART link"
-git tag -a v0.2-laser-link -m "verified: laser frames + no motion regression"
-# 鐑у綍楠岃瘉閫氳繃鍚庡啀鎵?tag锛涢獙璇佷笉閫氳繃鍒欎慨鏀瑰悗鍐嶆彁浜?```
+git commit -m "S2: centering straight"
+git tag -a v0.3-centering -m "verified: centering + no regression"
+# 烧录验证通过后再打 tag；不通过则修改后重新验证
+```
 
-鍥炴粴 + 閲嶇儳锛?
+回滚 + 重烧：
+
 ```powershell
-git checkout v0.1-baseline           # 鎴?git checkout -b hotfix v0.1-baseline
+git checkout v0.4-speed-loop          # 或 git checkout -b hotfix <tag>
 & 'D:\mdk5\UV4\UV4.exe' -b .\USER\WHEELTEC.uvprojx -o build.log
 & 'D:\mdk5\UV4\UV4.exe' -f .\USER\WHEELTEC.uvprojx -o flash.log
-# 楠岃瘉瀹屽洖鍒颁富绾匡細
-git checkout main
+git checkout main                     # 验证完回到主线
 ```
 
-## S1 鍏蜂綋鍐呭锛堟湰娆″疄鏂斤級
+## S2 具体内容（下一步实施）
 
-1. 鏂板 `USER/laser.c/.h`锛?   - UART5 RX 鐢?**DMA1 Stream0/Ch4 寰幆缂撳啿**锛?56 B锛夛紝閬垮厤 115200 涓嬭疆璇涪瀛楄妭锛?   - 甯ф牸寮忥細`AA 55 | dL(2) dR(2) dF(2) | flags | CRC8`锛圕RC8 澶氶」寮?0x07锛岃鐩?AA..flags锛夛紱
-   - 鎻愪緵 `Laser_Data_t {dL,dR,dF,flags,valid,last_ms}`锛岃秴鏃?100 ms 鍒ゅけ鏁堬紱
-   - 鍏抽棴瀹樻柟 UART5 鐨?RXNE 涓柇锛堥伩鍏嶄笌 DMA 鎶㈡暟鎹級銆?2. `USER/main.c`锛氬垵濮嬪寲 DMA+婵€鍏夛紝100 Hz 涓诲惊鐜噷 `Laser_Poll()`锛汷LED 澧炲姞涓€琛屾樉绀轰笁璺窛绂?鏈夋晥浣嶏紱USART1 姣忕鎵撳嵃涓€娆°€?3. 杩愬姩閫昏緫锛堢洿琛?90掳锛変繚鎸佷笌 v0.1 涓€鑷达紝纭繚鍙洖褰掋€?
-**S1 楠岃瘉鏂规硶**
+1. 激光链路（UART4）：恢复 `laser.c` 并接入主循环，帧格式 `AA 55 dL(2) dR(2) dF(2) flags CRC8`，超时 100 ms 判失效；
+2. 对中控制（50 Hz）：
+   - 横向：`e=(dL−dR)/2` → PD → δ（四轮同向偏转，限幅 ±8°）；
+   - 航向：IMU yaw → PD → Δ（前轮 +Δ、后轮 −Δ，限幅 ±5°）；
+   - 速度：现有编码器速度环（左右同步）；
+3. 安全：激光失效/超量程 → 停车；前激光 < 阈值 → 减速/停车。
 
-- 鏃?F103 鏃讹細鐢?USB-TTL 鎺?UART5锛圥C12=TX 涓嶇敤锛?*PD2=RX 鎺?USB-TTL 鐨?TX**锛孏ND 鍏卞湴锛夛紝
-  115200 鍙?10 瀛楄妭甯э紝渚嬪 `AA 55 96 00 8C 00 2C 01 07 <CRC>`锛屽睆骞曞簲鏄剧ず L=150 R=140 F=300銆?- 鏈?F103 鏃讹細鐩存帴鎺ヤ笂锛岀湅灞忓箷鏁板€兼槸鍚﹂殢閬尅鍙樺寲銆佹嫈绾?100 ms 鍐呭彉涓?`--`銆?- 鍥炲綊锛氫笂鐢靛悗鐩磋/鍘熷湴杞?90掳 涓庝箣鍓嶄竴鑷淬€?
-## 鍙傛暟涓庢爣瀹氾紙鍚勯樁娈靛叡鐢紝闆嗕腑鍒?`USER/config.h`锛?
-鑸垫満涓綅 trim銆佽埖鏈烘柟鍚戙€佺數鏈烘柟鍚戙€佽疆寰?杞窛/杞磋窛銆佸瀯璺?70 cm銆佹縺鍏夊畨瑁呭亸绉汇€?瀵逛腑 PID銆佽埅鍚?PID銆侀€熷害 PID銆佸畨鍏ㄩ槇鍊硷紙鍓嶆縺鍏夊仠璺濄€佹渶澶у亸宸€侀€氫俊瓒呮椂锛夈€?
----
+## S3 具体内容（S2 通过后）
 
-## 附：每阶段详细验证步骤
+四舵机 90° 横移，编码器计程 70 cm + 激光识别垄边沿精对中；单次换垄对中误差 ≤±2 cm。
 
-### 烧录方式（已统一为 WCH 无线 DAPLink / CMSIS-DAP）
+## S4/S5
 
-工程 `USER/WHEELTEC.uvoptx` 已设为 `<pMon>BIN\CMSIS_AGDI.dll</pMon>`，Keil 里直接 **F8**，
-或命令行：
+S4：状态机串联进场→6 垄蛇形→出场→启动区停车，空跑计时。
+S5：地毯段打滑检测、参数写 Flash、激光故障降级、速度优化。
 
-```powershell
-$uv='D:\mdk5\UV4\UV4.exe'; $proj='C:\Users\iheat\Desktop\smart wheels2\C30D_MotorTest\USER\WHEELTEC.uvprojx'
-& $uv -b $proj -o build.log      # 0 Error / 0 Warning
-& $uv -f $proj -o flash.log      # 看 "Verify OK. Application running"
-```
+## 参数与标定（各阶段共用）
 
-> WCH DAPLink 的 USB 复合设备带 COM18。COM18 是调试器自带的串口，**是否接到目标板 UART 需要确认线序**；
-> C30D 的调试日志默认仍从板上「串口1」Type-C（USART1，115200）输出。
-
-### S1 激光链路验证
-
-1. **接线（无 F103 时用 PC 模拟）**：USB-TTL 的 TX → C30D 扩展排针 **PD2**（UART5 RX），GND 共地；
-   不要接 5V；USB-TTL 设为 115200 8N1。
-2. **发帧**：下面三帧都是有效帧（含 CRC8），用串口助手“HEX 发送”，每 20~50 ms 重复发一帧：
-   ```
-   150/140/300 mm : AA 55 96 00 8C 00 2C 01 07 93
-   200/200/500 mm : AA 55 C8 00 C8 00 F4 01 07 1A
-   100/300/800 mm : AA 55 64 00 2C 01 20 03 07 A2
-   ```
-   期望：OLED 第 3/4 行显示 `L 150 R 140`、`F 300 OK`；停止发送 100 ms 后变成 `----` / `---`（LOST）。
-3. **回归**：上电后仍执行“直行 1.5 s → 原地转 +90° → 直行 → 转 −90°”，与 v0.1 行为一致。
-4. 需要时用串口助手接板上「串口1」Type-C（115200），每秒会打印 `L=150 R=140 F=300 fl=7 laser=OK`。
-
-### S2 对中直行验证
-
-- 场地：可用两根 30×12 cm 木条/泡沫条模拟垄侧壁，间距 40 cm；或直接上比赛场地的一条垄。
-- 步骤：车跨在垄上 → 上电 → 低速直行 2~3 m。
-- 通过标准：左右侧向偏差 ≤ ±3 cm、车身 yaw 波动 ≤ ±2°、不碰垄侧壁；
-  人为挡住一侧激光 → 100 ms 内停车；拿走遮挡后恢复。
-- 记录：把 USART1 日志（e、yaw、速度）存一份，便于调 PID。
-
-### S3 横移换垄验证
-
-- 在端部通道内：车停在垄 1 末端 → 四舵机 90° → 横移 70 cm → 对正垄 2 → 回 0°。
-- 通过标准：连续 5 次换垄，每次横向对中误差 ≤ ±2 cm；无碰撞；单次耗时记录。
-- 若轴距放不进 40 cm 端部通道 → 停止该阶段，改路径方案（原地转向）。
-
-### S4 全流程验证
-
-- 完整跑：进场 → 垄 1..6 蛇形 → 出场 → 启动区停车。
-- 通过标准：5 min 内完成、全程不碰围栏/垄、6 条垄都走完、停稳在启动区；
-  全程记录日志 + 手机录像，用于复盘。
-
-### S5 鲁棒性验证
-
-- 地毯路段（两条垄沟）直行/换垄不跑偏、不堵转；
-- 激光拔线 100 ms 内停车；重新插上恢复；
-- 参数改完断电重启仍保持（Flash 保存）；
-- 连续 3 次全流程用时对比。
-
-### 回滚方法
-
-```powershell
-Set-Location 'C:\Users\iheat\Desktop\smart wheels2\C30D_MotorTest'
-git checkout v0.2-laser-link     # 回到上一个已验证阶段（tag 名见上表）
-& 'D:\mdk5\UV4\UV4.exe' -b .\USER\WHEELTEC.uvprojx -o build.log
-& 'D:\mdk5\UV4\UV4.exe' -f .\USER\WHEELTEC.uvprojx -o flash.log
-git checkout main                # 验证完回到主线继续开发
-```
+舵机中位 trim、舵机方向、电机方向、轮径（标定 76.4 mm）、轮距/轴距、垄距 70 cm、
+激光安装偏移、对中 PID、航向 PID、速度 PID、安全阈值（前激光停距、最大偏差、通信超时）。
