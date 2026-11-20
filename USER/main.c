@@ -45,6 +45,10 @@
 #define RUN_TIMEOUT_MS     15000u
 #define CENT_TEST_SPD      600      /* centering test base speed counts/20ms */
 #define CENT_TEST_CM       150u     /* centering test distance, cm */
+#define SHIFT_TEST_CM      100u     /* crab (lane-entry) test distance, cm */
+#define SHIFT_SPD          500      /* counts/20ms during the sideways shift */
+#define SHIFT_WAIT_MS      600u     /* servo settle time */
+#define SHIFT_TIMEOUT_MS   15000u
 
 /* ICM-20948 heading hold (onboard IMU, I2C) */
 #define GYRO_LSB_PER_DPS   65.5f
@@ -63,7 +67,7 @@
 
 #define SERVO_CENTER       500
 #define SERVO_UNIT_PER_DEG 4.1667f
-#define SERVO_MOVE_MS      1000u
+#define SERVO_MOVE_MS      300u
 #define BROADCAST_ID       0xFEu
 
 /* wheels: FL=0 FR=1 RL=2 RR=3 ; servos: FL=4 FR=3 RL=2 RR=1 */
@@ -103,6 +107,16 @@ static u8  cent_mode;        /* 1 = centering straight test in progress */
 static u16 cent_lost_ticks;  /* consecutive 20 ms ticks without a fresh laser frame */
 static u8  cent_show;        /* 1 = show centering result on OLED */
 static u32 cent_start_ms;
+
+/* USER-key long press = 70 cm crab lane-shift test */
+static u32 key_down_ms;
+static u8  key_hold;
+static u8  shift_mode;
+static u8  shift_phase;
+static u32 shift_start_ms;
+static u32 shift_t0;
+static u16 shift_base_cm;
+static u8  shift_show;
 static u16 cent_base_cm;     /* odometry baseline at test start */
 static u8  run_state;        /* 0 idle, 1 running, 2 done */
 static s32 run_counts;       /* average encoder counts travelled */
@@ -422,6 +436,7 @@ static void run_start(void)
   speed_reset();
   tx_puts(USART1, "70CM START\r\n");
   tx_puts(USART3, "70CM START\r\n");
+  tx_puts(UART5,  "70CM START\r\n");
 }
 
 static void run_stop(const char *why)
@@ -431,10 +446,13 @@ static void run_stop(const char *why)
   run_state = 2u;
   tx_puts(USART1, why);
   tx_puts(USART3, why);
+  tx_puts(UART5,  why);
   tx_puts(USART1, " counts=");
   tx_puts(USART3, " counts=");
+  tx_puts(UART5,  " counts=");
   tx_num(USART1, (int)run_counts);
   tx_num(USART3, (int)run_counts);
+  tx_num(UART5,  (int)run_counts);
   tx_puts(USART1, "\r\n");
   tx_puts(USART3, "\r\n");
 }
@@ -448,22 +466,45 @@ static s32 run_dist_01mm(void)
 /* ======================================================================= */
 /*  OLED                                                                  */
 /* ======================================================================= */
+static void show_signed(u8 x, u8 y, int32_t v, u8 digits)
+{
+  if (v < 0) { OLED_ShowString(x, y, (u8 *)"-"); v = -v; }
+  else       { OLED_ShowString(x, y, (u8 *)"+"); }
+  OLED_ShowNumber((u8)(x + 8u), y, (u32)v, digits, 12);
+}
+
 static void screen(void)
 {
   u8 i, y;
   s32 d01 = run_dist_01mm();
+
+  if ((shift_mode != 0u) || (shift_show != 0u))
+  {
+    OLED_Clear();
+    OLED_ShowString(0, 0, (u8 *)(shift_mode != 0u ? "SHIFT RUNNING" : "SHIFT RESULT"));
+    OLED_ShowString(0, 10, (u8 *)"DIST");
+    OLED_ShowNumber(40, 10, (u32)((u16)(App_GetDistanceCm() - shift_base_cm)), 4, 12);
+    OLED_ShowString(0, 20, (u8 *)"CMD");
+    OLED_ShowNumber(40, 20, (u32)shift_phase, 1, 12);
+    OLED_ShowString(0, 30, (u8 *)"L");
+    OLED_ShowNumber(16, 30, (u32)((g_laser.dL == 0xFFFFu) ? 0u : g_laser.dL), 4, 12);
+    OLED_ShowString(64, 30, (u8 *)"R");
+    OLED_ShowNumber(80, 30, (u32)((g_laser.dR == 0xFFFFu) ? 0u : g_laser.dR), 4, 12);
+    OLED_Refresh_Gram();
+    return;
+  }
 
   if ((cent_mode != 0u) || (cent_show != 0u))
   {
     OLED_Clear();
     OLED_ShowString(0, 0, (u8 *)(cent_mode != 0u ? "CENTER RUNNING" : "CENTER RESULT"));
     OLED_ShowString(0, 10, (u8 *)"E");
-    OLED_ShowNumber(16, 10, (u32)(g_centering.e_cm * 10.0f), 4, 12);
+    show_signed(16, 10, (int32_t)(g_centering.e_cm * 10.0f), 4);
     OLED_ShowString(64, 10, (u8 *)"0.1cm");
     OLED_ShowString(0, 20, (u8 *)"D");
-    OLED_ShowNumber(16, 20, (u32)(g_centering.delta_deg * 10.0f), 4, 12);
+    show_signed(16, 20, (int32_t)(g_centering.delta_deg * 10.0f), 4);
     OLED_ShowString(0, 30, (u8 *)"T");
-    OLED_ShowNumber(16, 30, (u32)(g_centering.toe_deg * 10.0f), 4, 12);
+    show_signed(16, 30, (int32_t)(g_centering.toe_deg * 10.0f), 4);
     OLED_ShowString(0, 40, (u8 *)"DIST");
     OLED_ShowNumber(40, 40, (u32)((u16)(App_GetDistanceCm() - cent_base_cm)), 4, 12);
     OLED_ShowString(0, 50, (u8 *)(g_centering.saturated ? "SAT" : "   "));
@@ -576,6 +617,8 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
   else if ((c[0] == 'S') || (c[0] == 'X'))
   {
     cent_show = 0u;
+    shift_mode = 0u;
+    shift_show = 0u;
     cent_mode = 0u;
     run_state = 0u;
     app_override = 0u;
@@ -697,6 +740,21 @@ static u8 fsm_active(void)
 {
   CarState st = FSM_GetState();
   return ((st == ST_ENTRY) || (st == ST_RIDGE) || (st == ST_SHIFT) || (st == ST_EXIT)) ? 1u : 0u;
+}
+
+static void shift_start(void)
+{
+  shift_mode  = 1u;
+  shift_show  = 0u;
+  shift_phase = 0u;
+  shift_start_ms = ms_now();
+  shift_t0    = ms_now();
+  shift_base_cm = App_GetDistanceCm();
+  cent_show   = 0u;
+  App_DriveStop();
+  App_SetSteerAll(90.0f);        /* all four wheels crab 90 deg */
+  tx_puts(USART1, "SHIFT START\r\n");
+  tx_puts(UART5,  "SHIFT START\r\n");
 }
 
 static void tx_hexb(USART_TypeDef *u, u8 v)
@@ -864,6 +922,48 @@ int main(void)
         yaw_rate_dps = r;
         if ((motor_run != 0) || (fsm_active() != 0u)) yaw_deg += r * 0.02f;
 
+        if (shift_mode != 0u)
+        {
+          if (shift_phase == 0u)
+          {
+            if ((ms_now() - shift_t0) > SHIFT_WAIT_MS) shift_phase = 1u;
+          }
+          else if (shift_phase == 1u)
+          {
+            s16 sp[4];
+            sp[0] = SHIFT_SPD; sp[1] = SHIFT_SPD;
+            sp[2] = SHIFT_SPD; sp[3] = SHIFT_SPD;
+            App_SetWheelSpeed(sp);
+            if ((u16)(App_GetDistanceCm() - shift_base_cm) >= SHIFT_TEST_CM)
+            {
+              shift_phase = 2u;
+              App_DriveStop();
+              App_SetServoCenter();
+              shift_t0 = ms_now();
+            }
+          }
+          else
+          {
+            if ((ms_now() - shift_t0) > SHIFT_WAIT_MS)
+            {
+              shift_mode = 0u;
+              shift_show = 1u;
+              tx_puts(USART1, "SHIFT DONE\r\n");
+              tx_puts(UART5,  "SHIFT DONE\r\n");
+            }
+          }
+          if ((shift_phase < 2u) &&
+              ((ms_now() - shift_start_ms) > SHIFT_TIMEOUT_MS))
+          {
+            shift_mode = 0u;
+            shift_show = 1u;
+            App_DriveStop();
+            App_SetServoCenter();
+            tx_puts(USART1, "SHIFT TIMEOUT\r\n");
+            tx_puts(UART5,  "SHIFT TIMEOUT\r\n");
+          }
+        }
+
         if (cent_mode != 0u)
         {
           s16 cspd[4];
@@ -934,26 +1034,26 @@ int main(void)
     /* USER key (PE0, active low): start the 70 cm straight run */
     {
       u8 k = (GPIO_ReadInputDataBit(GPIOE, GPIO_Pin_0) == Bit_RESET) ? 1u : 0u;
-      if ((k != 0u) && (key_last == 0u) && (run_state == 0u) && (cent_mode == 0u))
+      if ((k != 0u) && (key_last == 0u))
       {
-        if (fsm_active() == 0u)
+        key_down_ms = ms_now();
+        key_hold = 1u;
+      }
+      else if ((k == 0u) && (key_last != 0u) && (key_hold != 0u))
+      {
+        u32 dur = ms_now() - key_down_ms;
+        key_hold = 0u;
+
+        if ((fsm_active() == 0u) && (run_state == 0u) &&
+            (cent_mode == 0u) && (shift_mode == 0u))
         {
-          if ((Laser_IsFresh() != 0u) &&
-              (g_laser.dL != 0xFFFFu) && (g_laser.dR != 0xFFFFu))
+          if (dur >= 1200u)
           {
-            cent_mode = 1u;
-            cent_show = 0u;
-            cent_lost_ticks = 0u;
-            cent_start_ms = ms_now();
-            cent_base_cm = App_GetDistanceCm();
-            Centering_Init();
-            tx_puts(USART1, "KEY CENT START\r\n");
-            tx_puts(UART5,  "KEY CENT START\r\n");
+            shift_start();          /* long press: crab 100 cm (进垄) */
           }
           else
           {
-            tx_puts(USART1, "KEY CENT: SIDE LASER INVALID\r\n");
-            tx_puts(UART5,  "KEY CENT: SIDE LASER INVALID\r\n");
+            run_start();            /* short press: forward 70 cm (换垄) */
           }
         }
       }
@@ -969,7 +1069,8 @@ int main(void)
       run_stop("70CM TIMEOUT");
     }
 
-    if ((cent_mode == 0u) && (fsm_active() == 0u) && (motor_run != 0) &&
+    if ((cent_mode == 0u) && (shift_mode == 0u) && (run_state != 1u) &&
+        (fsm_active() == 0u) && (motor_run != 0) &&
         ((ms_now() - last_cmd_ms) > CMD_TIMEOUT_MS))
     {
       motor_run = 0;
