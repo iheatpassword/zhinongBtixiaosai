@@ -26,7 +26,11 @@ typedef struct
   u16 dL;              /* left  distance, mm */
   u16 dR;              /* right distance, mm */
   u16 dF;              /* front distance, mm */
-  u8  flags;           /* bit0 front ok, bit1 left ok, bit2 right ok, bit3 timeout */
+  u8  flags;           /* bit0/1/2: that sensor HAS DATA (a frame arrived);
+                          bit3: sender-side timeout/error flag.
+                          NOTE: "has data" does NOT mean "in range" - the raw
+                          distance is passed through (0xFFFF etc.) and range
+                          validity is judged here on the C30D side. */
   u8  valid;           /* frame received within the last 100 ms */
   u32 last_ms;
 
