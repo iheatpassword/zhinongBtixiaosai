@@ -28,6 +28,10 @@
 
 #define LASER_HDR0            0xAAu
 #define LASER_HDR1            0x55u
+#define LASER_AUX_HDR1        0x56u
+#define LASER_AUX_PAYLOAD     4u     /* id(1) d(2) flags(1)                 */
+#define LASER_AUX_TAIL        5u     /* 4 payload + 1 CRC                   */
+#define LASER_AUX_ID_RIDGE    1u     /* id of the ridge-side aux sensor     */
 #define LASER_PAYLOAD_LEN     7u     /* dL(2) dR(2) dF(2) flags             */
 #define LASER_FRAME_TAIL      8u     /* 7 payload bytes + 1 CRC byte        */
 
@@ -46,6 +50,8 @@ static u16 dma_last;                /* next buffer index to consume (0..255)*/
 static u8  rx_state;                /* 0 hunt AA, 1 expect 55, 2 payload     */
 static u8  rx_idx;                  /* bytes collected for the current frame */
 static u8  rx_frame[LASER_FRAME_TAIL];
+static u8  aux_frame[LASER_AUX_TAIL];
+static u8  aux_idx;
 
 /* ----------------------------------------------------------------------- */
 /*  CRC8: polynomial 0x07, init 0x00 (same as the F103 sender)             */
@@ -72,7 +78,7 @@ static u8 laser_crc8(const u8 *p, u16 n)
 /* ----------------------------------------------------------------------- */
 static void laser_parse_byte(u8 b)
 {
-  u8 tmp[9];
+  u8 tmp[12];
   u8 i;
 
   /* raw monitor: count every byte, keep the last 8 in a rolling ring.
@@ -96,13 +102,44 @@ static void laser_parse_byte(u8 b)
         rx_state = 2u;
         rx_idx   = 0u;
       }
+      else if (b == LASER_AUX_HDR1)
+      {
+        rx_state = 3u;
+        aux_idx  = 0u;
+      }
       else if (b != LASER_HDR0)               /* AA AA .. restarts the hunt  */
       {
         rx_state = 0u;
       }
       break;
 
-    default:                                  /* payload + CRC               */
+    case 3u:                                  /* auxiliary frame payload+CRC */
+      aux_frame[aux_idx] = b;
+      aux_idx++;
+      if (aux_idx >= LASER_AUX_TAIL)
+      {
+        tmp[0] = LASER_HDR0;
+        tmp[1] = LASER_AUX_HDR1;
+        for (i = 0u; i < LASER_AUX_PAYLOAD; i++)
+        {
+          tmp[2u + i] = aux_frame[i];
+        }
+        if (laser_crc8(tmp, 6u) == aux_frame[LASER_AUX_PAYLOAD])
+        {
+          if (aux_frame[0] == LASER_AUX_ID_RIDGE)
+          {
+            g_laser.dRidge     = (u16)aux_frame[1] | ((u16)aux_frame[2] << 8);
+            g_laser.ridge_flags = aux_frame[3];
+            g_laser.ridge_ms   = App_MsNow();
+            g_laser.ridge_valid = 1u;
+          }
+        }
+        rx_state = 0u;
+        aux_idx  = 0u;
+      }
+      break;
+
+    default:                                  /* main frame payload + CRC    */
       rx_frame[rx_idx] = b;
       rx_idx++;
       if (rx_idx >= LASER_FRAME_TAIL)
@@ -239,6 +276,11 @@ void Laser_Poll(void)
   {
     g_laser.valid = 0u;
     g_laser.flags |= LASER_FLAG_TIMEOUT;
+  }
+
+  if ((u32)(App_MsNow() - g_laser.ridge_ms) > LASER_TIMEOUT_MS)
+  {
+    g_laser.ridge_valid = 0u;
   }
 }
 

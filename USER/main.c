@@ -58,6 +58,11 @@
 #define SHIFT_DF_KI         0.0f     /* disabled: single front laser cannot centre */
 #define SHIFT_DF_LOOP_SIGN  (-1.0f)  /* flipped per bench: +1 drove the wrong way */
 #define SHIFT_YAW_TARGET_MAX 5.0f    /* outer-loop yaw target clamp, deg         */
+/* aux ridge-side sensor: lateral offset = distance to the straddled ridge wall */
+#define RIDGE_TARGET_MM     120.0f   /* calibrated distance when the car is centred */
+#define RIDGE_KP            0.05f    /* deg common steering offset per mm error     */
+#define RIDGE_OFFSET_MAX    6.0f     /* clamp, deg                                  */
+#define RIDGE_SIGN          (1.0f)   /* flip if the car moves the wrong way         */
 #define SHIFT_DF_FILT_ALPHA  0.3f    /* low-pass on dF                           */
 #define SHIFT_TOE_MAX       8.0f     /* toe clamp, deg                          */
 #define SHIFT_DRIFT_MAX     8.0f     /* common offset clamp, deg                */
@@ -956,8 +961,19 @@ int main(void)
           {
             s16 sp[4];
             float r = gyro_z_dps() * GYRO_SIGN;
-            float a = 90.0f;
+            float a;
+            float doff = 0.0f;
             float cy, yaw_err;
+
+            /* lateral offset from the aux ridge-side laser (direct measurement) */
+            if ((g_laser.ridge_valid != 0u) && (g_laser.dRidge >= 30u) && (g_laser.dRidge <= 600u))
+            {
+              doff = RIDGE_SIGN * RIDGE_KP *
+                     ((float)g_laser.dRidge - RIDGE_TARGET_MM);
+              if (doff >  RIDGE_OFFSET_MAX) doff =  RIDGE_OFFSET_MAX;
+              if (doff < -RIDGE_OFFSET_MAX) doff = -RIDGE_OFFSET_MAX;
+            }
+            a = 90.0f + doff;
 
             /* outer loop: front-laser distance -> slow heading target so that
                the car axis stays parallel to the ridge wall                  */
@@ -1207,6 +1223,12 @@ int main(void)
         tx_num(u, (g_laser.dF == 0xFFFFu) ? -1 : (int)g_laser.dF);
         tx_putc(u, ',');
         tx_num(u, (int)g_laser.flags);
+        tx_puts(u, " RG=");
+        tx_num(u, (g_laser.dRidge == 0xFFFFu) ? -1 : (int)g_laser.dRidge);
+        tx_putc(u, ',');
+        tx_num(u, (int)g_laser.ridge_flags);
+        tx_putc(u, ',');
+        tx_num(u, (int)g_laser.ridge_valid);
         tx_puts(u, " LZN=");
         tx_num(u, (int)g_laser.raw_count);
         tx_puts(u, " LB=");

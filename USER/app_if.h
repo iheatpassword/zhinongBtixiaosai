@@ -17,7 +17,8 @@
 
 /* ======================================================================= */
 /*  Laser range finder link (UART4: PC10 = TX, PC11 = RX, 115200 8N1)       */
-/*  Frame: 0xAA 0x55 | dL(2) dR(2) dF(2) | flags | CRC8                     */
+/*  Main frame: 0xAA 0x55 | dL(2) dR(2) dF(2) | flags | CRC8                 */
+/*  Aux  frame: 0xAA 0x56 | id(1) | d(2) | flags | CRC8  (id=1 ridge sensor) */
 /*         distances mm little endian, 0xFFFF = invalid                    */
 /*         CRC8 poly 0x07 init 0x00 over 0xAA,0x55 + 7 payload bytes       */
 /* ======================================================================= */
@@ -26,6 +27,10 @@ typedef struct
   u16 dL;              /* left  distance, mm */
   u16 dR;              /* right distance, mm */
   u16 dF;              /* front distance, mm */
+  u16 dRidge;          /* aux sensor: distance to the straddled ridge side, mm  */
+  u8  ridge_flags;     /* aux sensor flags (bit0 = has data)                    */
+  u8  ridge_valid;     /* aux frame received within the last 100 ms             */
+  u32 ridge_ms;        /* aux frame timestamp                                    */
   u8  flags;           /* bit0/1/2: that sensor HAS DATA (a frame arrived);
                           bit3: sender-side timeout/error flag.
                           NOTE: "has data" does NOT mean "in range" - the raw
