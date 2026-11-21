@@ -1,4 +1,4 @@
-/**
+﻿/**
   * @file    laser.c
   * @brief   Laser range finder link on UART4: DMA1 Stream2 / Channel4
   *          circular receive + CRC8 frame parser (replaces the legacy
@@ -28,10 +28,8 @@
 
 #define LASER_HDR0            0xAAu
 #define LASER_HDR1            0x55u
-#define LASER_AUX_HDR1        0x56u
-#define LASER_AUX_PAYLOAD     4u     /* id(1) d(2) flags(1)                 */
-#define LASER_AUX_TAIL        5u     /* 4 payload + 1 CRC                   */
-#define LASER_AUX_ID_RIDGE    1u     /* id of the ridge-side aux sensor     */
+#define LASER_V2_LEN          12u    /* AA55 + 4 distances + flags + CRC    */
+#define LASER_V1_LEN          10u    /* legacy: 3 distances + flags + CRC   */
 #define LASER_PAYLOAD_LEN     7u     /* dL(2) dR(2) dF(2) flags             */
 #define LASER_FRAME_TAIL      8u     /* 7 payload bytes + 1 CRC byte        */
 
@@ -47,11 +45,8 @@ volatile LaserData g_laser;
 static u8  dma_buf[LASER_BUF_SIZE]; /* written by DMA1 Stream2              */
 static u16 dma_last;                /* next buffer index to consume (0..255)*/
 
-static u8  rx_state;                /* 0 hunt AA, 1 expect 55, 2 payload     */
-static u8  rx_idx;                  /* bytes collected for the current frame */
-static u8  rx_frame[LASER_FRAME_TAIL];
-static u8  aux_frame[LASER_AUX_TAIL];
-static u8  aux_idx;
+static u8  win[LASER_V2_LEN];
+static u8  win_len;
 
 /* ----------------------------------------------------------------------- */
 /*  CRC8: polynomial 0x07, init 0x00 (same as the F103 sender)             */
@@ -76,99 +71,90 @@ static u8 laser_crc8(const u8 *p, u16 n)
 /* ----------------------------------------------------------------------- */
 /*  Consume one byte: raw monitor + 0xAA55 frame hunt + CRC check           */
 /* ----------------------------------------------------------------------- */
+static void win_drop(u8 n)
+{
+  u8 i;
+  for (i = 0u; (u8)(i + n) < win_len; i++)
+  {
+    win[i] = win[i + n];
+  }
+  win_len = (u8)(win_len - n);
+}
+
+/*  Parse one complete v2 frame (12 bytes): AA55 dL dR dF dB flags crc       */
+static void laser_emit_v2(const u8 *f)
+{
+  g_laser.dL    = (u16)f[2]  | ((u16)f[3]  << 8);
+  g_laser.dR    = (u16)f[4]  | ((u16)f[5]  << 8);
+  g_laser.dF    = (u16)f[6]  | ((u16)f[7]  << 8);
+  g_laser.dRidge = (u16)f[8] | ((u16)f[9]  << 8);
+  g_laser.flags = f[10];
+  g_laser.ridge_flags = (u8)((f[10] & 0x10u) ? 1u : 0u);
+  g_laser.ridge_valid = (u8)((f[10] & 0x10u) ? 1u : 0u);
+  g_laser.ridge_ms = App_MsNow();
+  g_laser.last_ms  = App_MsNow();
+  g_laser.valid    = 1u;
+}
+
+/*  Legacy v1 frame (10 bytes): AA55 dL dR dF flags crc                     */
+static void laser_emit_v1(const u8 *f)
+{
+  g_laser.dL    = (u16)f[2] | ((u16)f[3] << 8);
+  g_laser.dR    = (u16)f[4] | ((u16)f[5] << 8);
+  g_laser.dF    = (u16)f[6] | ((u16)f[7] << 8);
+  g_laser.flags = f[8];
+  g_laser.ridge_valid = 0u;
+  g_laser.last_ms = App_MsNow();
+  g_laser.valid   = 1u;
+}
+
+/* ----------------------------------------------------------------------- */
+/*  Consume one byte: raw monitor + AA55 window hunt (v2 first, then v1)    */
+/* ----------------------------------------------------------------------- */
 static void laser_parse_byte(u8 b)
 {
-  u8 tmp[12];
-  u8 i;
-
-  /* raw monitor: count every byte, keep the last 8 in a rolling ring.
-     raw_last[raw_idx] is the oldest byte, raw_idx is the next write slot. */
+  /* raw monitor: count every byte, keep the last 8 in a rolling ring. */
   g_laser.raw_count++;
   g_laser.raw_last[g_laser.raw_idx & 7u] = b;
   g_laser.raw_idx = (u8)((g_laser.raw_idx + 1u) & 7u);
 
-  switch (rx_state)
+  if (win_len < LASER_V2_LEN)
   {
-    case 0u:                                  /* hunting for header byte 0   */
-      if (b == LASER_HDR0)
-      {
-        rx_state = 1u;
-      }
-      break;
+    win[win_len] = b;
+    win_len++;
+  }
+  else
+  {
+    win_drop(1u);
+    win[LASER_V2_LEN - 1u] = b;
+  }
 
-    case 1u:                                  /* hunting for header byte 1   */
-      if (b == LASER_HDR1)
-      {
-        rx_state = 2u;
-        rx_idx   = 0u;
-      }
-      else if (b == LASER_AUX_HDR1)
-      {
-        rx_state = 3u;
-        aux_idx  = 0u;
-      }
-      else if (b != LASER_HDR0)               /* AA AA .. restarts the hunt  */
-      {
-        rx_state = 0u;
-      }
-      break;
+  while ((win_len >= 2u) && !((win[0] == LASER_HDR0) && (win[1] == LASER_HDR1)))
+  {
+    win_drop(1u);
+  }
 
-    case 3u:                                  /* auxiliary frame payload+CRC */
-      aux_frame[aux_idx] = b;
-      aux_idx++;
-      if (aux_idx >= LASER_AUX_TAIL)
-      {
-        tmp[0] = LASER_HDR0;
-        tmp[1] = LASER_AUX_HDR1;
-        for (i = 0u; i < LASER_AUX_PAYLOAD; i++)
-        {
-          tmp[2u + i] = aux_frame[i];
-        }
-        if (laser_crc8(tmp, 6u) == aux_frame[LASER_AUX_PAYLOAD])
-        {
-          if (aux_frame[0] == LASER_AUX_ID_RIDGE)
-          {
-            g_laser.dRidge     = (u16)aux_frame[1] | ((u16)aux_frame[2] << 8);
-            g_laser.ridge_flags = aux_frame[3];
-            g_laser.ridge_ms   = App_MsNow();
-            g_laser.ridge_valid = 1u;
-          }
-        }
-        rx_state = 0u;
-        aux_idx  = 0u;
-      }
-      break;
+  if (win_len >= LASER_V1_LEN)
+  {
+    if (laser_crc8(win, 9u) == win[9])
+    {
+      laser_emit_v1(win);
+      win_len = 0u;
+      return;
+    }
+  }
 
-    default:                                  /* main frame payload + CRC    */
-      rx_frame[rx_idx] = b;
-      rx_idx++;
-      if (rx_idx >= LASER_FRAME_TAIL)
-      {
-        tmp[0] = LASER_HDR0;
-        tmp[1] = LASER_HDR1;
-        for (i = 0u; i < LASER_PAYLOAD_LEN; i++)
-        {
-          tmp[2u + i] = rx_frame[i];
-        }
-
-        if (laser_crc8(tmp, 9u) == rx_frame[LASER_PAYLOAD_LEN])
-        {
-          g_laser.dL    = (u16)rx_frame[0] | ((u16)rx_frame[1] << 8);
-          g_laser.dR    = (u16)rx_frame[2] | ((u16)rx_frame[3] << 8);
-          g_laser.dF    = (u16)rx_frame[4] | ((u16)rx_frame[5] << 8);
-          g_laser.flags = rx_frame[6];
-          g_laser.last_ms = App_MsNow();
-          g_laser.valid = 1u;
-        }
-
-        rx_state = 0u;
-        rx_idx   = 0u;
-      }
-      break;
+  if (win_len >= LASER_V2_LEN)
+  {
+    if (laser_crc8(win, 11u) == win[11])
+    {
+      laser_emit_v2(win);
+      win_len = 0u;
+      return;
+    }
+    win_drop(1u);
   }
 }
-
-/* ----------------------------------------------------------------------- */
 /*  Initialise GPIOC + UART4 + DMA1 Stream2/Channel4 (UART4_RX)            */
 /* ----------------------------------------------------------------------- */
 void Laser_Init(void)
@@ -233,8 +219,7 @@ void Laser_Init(void)
 
   /* --- parser + public state ------------------------------------------ */
   dma_last = 0u;
-  rx_state = 0u;
-  rx_idx   = 0u;
+  win_len = 0u;
 
   g_laser.dL    = LASER_INVALID_MM;
   g_laser.dR    = LASER_INVALID_MM;
