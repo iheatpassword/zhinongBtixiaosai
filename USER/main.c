@@ -55,10 +55,12 @@
 #define SHIFT_BOUNDARY_MM   70u      /* side laser <= this -> field boundary    */
 #define SHIFT_YAW_KP        2.2f     /* deg toe per deg yaw                     */
 #define SHIFT_YAW_KD        0.4f     /* deg toe per deg/s yaw rate              */
-#define SHIFT_DF_KP         0.03f    /* deg common offset per mm front-laser err */
-#define SHIFT_DF_KD         0.0f     /* no derivative (laser noise)              */
+#define SHIFT_DF_KI         0.0f     /* disabled: single front laser cannot centre */
+#define SHIFT_DF_LOOP_SIGN  (-1.0f)  /* flipped per bench: +1 drove the wrong way */
+#define SHIFT_YAW_TARGET_MAX 5.0f    /* outer-loop yaw target clamp, deg         */
+#define SHIFT_DF_FILT_ALPHA  0.3f    /* low-pass on dF                           */
 #define SHIFT_TOE_MAX       8.0f     /* toe clamp, deg                          */
-#define SHIFT_DRIFT_MAX     6.0f     /* common offset clamp, deg                */
+#define SHIFT_DRIFT_MAX     8.0f     /* common offset clamp, deg                */
 #define SHIFT_TOE_SIGN      (-1.0f)  /* unused when speed-diff yaw hold is active */
 #define SHIFT_YAW_SPD_KP    40.0f    /* counts/20ms per deg yaw                   */
 #define SHIFT_YAW_SPD_KD    8.0f     /* counts/20ms per deg/s yaw rate            */
@@ -132,8 +134,10 @@ static u32 shift_start_ms;
 static u32 shift_t0;
 static u16 shift_base_cm;
 static u8  shift_show;
-static float shift_df_prev;
-static u8  shift_df_prev_valid;
+static s16 shift_doff_dbg;
+static s16 shift_af_dbg;
+static float shift_yaw_target;
+static float shift_df_filt;
 static u16 cent_base_cm;     /* odometry baseline at test start */
 static u8  run_state;        /* 0 idle, 1 running, 2 done */
 static s32 run_counts;       /* average encoder counts travelled */
@@ -769,8 +773,8 @@ static void shift_start(void)
   shift_base_cm = App_GetDistanceCm();
   cent_show   = 0u;
   yaw_deg     = 0.0f;
-  shift_df_prev = 0.0f;
-  shift_df_prev_valid = 0u;
+  shift_yaw_target = 0.0f;
+  shift_df_filt = 0.0f;
   App_DriveStop();
   App_SetSteerAll(90.0f);        /* all four wheels crab 90 deg */
   tx_puts(USART1, "SHIFT START\r\n");
@@ -952,37 +956,38 @@ int main(void)
           {
             s16 sp[4];
             float r = gyro_z_dps() * GYRO_SIGN;
-            float doff = 0.0f;
-            float dferr, dnder;
-            float a;
+            float a = 90.0f;
+            float cy, yaw_err;
 
+            /* outer loop: front-laser distance -> slow heading target so that
+               the car axis stays parallel to the ridge wall                  */
             if ((g_laser.dF != 0xFFFFu) && (g_laser.dF >= 80u) && (g_laser.dF <= 500u))
             {
-              dferr = SHIFT_DF_TARGET_MM - (float)g_laser.dF;
-              if (shift_df_prev_valid != 0u) dnder = (float)g_laser.dF - shift_df_prev;
-              else                            dnder = 0.0f;
-              shift_df_prev = (float)g_laser.dF;
-              shift_df_prev_valid = 1u;
-              doff = SHIFT_DF_KP * dferr - SHIFT_DF_KD * 50.0f * dnder;
-              if (doff >  SHIFT_DRIFT_MAX) doff =  SHIFT_DRIFT_MAX;
-              if (doff < -SHIFT_DRIFT_MAX) doff = -SHIFT_DRIFT_MAX;
+              if (shift_df_filt == 0.0f) shift_df_filt = (float)g_laser.dF;
+              shift_df_filt += SHIFT_DF_FILT_ALPHA * ((float)g_laser.dF - shift_df_filt);
+
+              shift_yaw_target += SHIFT_DF_LOOP_SIGN * SHIFT_DF_KI *
+                                  (SHIFT_DF_TARGET_MM - shift_df_filt) * 0.02f;
+              if (shift_yaw_target >  SHIFT_YAW_TARGET_MAX) shift_yaw_target =  SHIFT_YAW_TARGET_MAX;
+              if (shift_yaw_target < -SHIFT_YAW_TARGET_MAX) shift_yaw_target = -SHIFT_YAW_TARGET_MAX;
             }
 
-            /* yaw hold through a front/rear wheel speed differential (tank style) */
-            {
-              float cy = SHIFT_YAW_SPD_KP * yaw_deg + SHIFT_YAW_SPD_KD * r;
-              if (cy >  SHIFT_YAW_SPD_MAX) cy =  SHIFT_YAW_SPD_MAX;
-              if (cy < -SHIFT_YAW_SPD_MAX) cy = -SHIFT_YAW_SPD_MAX;
-              cy *= SHIFT_YAW_SPD_SIGN;
+            /* inner loop: yaw error against the slow target -> front/rear speed differential */
+            yaw_err = yaw_deg - shift_yaw_target;
+            cy = SHIFT_YAW_SPD_KP * yaw_err + SHIFT_YAW_SPD_KD * r;
+            if (cy >  SHIFT_YAW_SPD_MAX) cy =  SHIFT_YAW_SPD_MAX;
+            if (cy < -SHIFT_YAW_SPD_MAX) cy = -SHIFT_YAW_SPD_MAX;
+            cy *= SHIFT_YAW_SPD_SIGN;
 
-              a = 90.0f + doff;
-              App_SetSteer4(a, a, a, a);
+            App_SetSteer4(a, a, a, a);
 
-              sp[0] = (s16)(SHIFT_SPD - cy);   /* front-left  */
-              sp[1] = (s16)(SHIFT_SPD - cy);   /* front-right */
-              sp[2] = (s16)(SHIFT_SPD + cy);   /* rear-left   */
-              sp[3] = (s16)(SHIFT_SPD + cy);   /* rear-right  */
-            }
+            shift_doff_dbg = (s16)(shift_yaw_target * 10.0f);
+            shift_af_dbg   = (s16)(yaw_err * 10.0f);
+
+            sp[0] = (s16)(SHIFT_SPD - cy);   /* front-left  */
+            sp[1] = (s16)(SHIFT_SPD - cy);   /* front-right */
+            sp[2] = (s16)(SHIFT_SPD + cy);   /* rear-left   */
+            sp[3] = (s16)(SHIFT_SPD + cy);   /* rear-right  */
             App_SetWheelSpeed(sp);
 
             if ((u16)(App_GetDistanceCm() - shift_base_cm) >= SHIFT_TEST_CM)
@@ -991,6 +996,15 @@ int main(void)
               App_DriveStop();
               App_SetServoCenter();
               shift_t0 = ms_now();
+            }
+            else if ((g_laser.dF != 0xFFFFu) && (g_laser.dF < 150u))
+            {
+              shift_phase = 2u;
+              App_DriveStop();
+              App_SetServoCenter();
+              shift_t0 = ms_now();
+              tx_puts(USART1, "SHIFT FRONT NEAR\r\n");
+              tx_puts(UART5,  "SHIFT FRONT NEAR\r\n");
             }
             else if (((g_laser.dL != 0xFFFFu) && (g_laser.dL <= SHIFT_BOUNDARY_MM)) ||
                      ((g_laser.dR != 0xFFFFu) && (g_laser.dR <= SHIFT_BOUNDARY_MM)))
@@ -1171,7 +1185,11 @@ int main(void)
           tx_num(u, (int)pwm_out[w]);
           tx_putc(u, ' ');
         }
-        tx_puts(u, "CE=");
+        tx_puts(u, "DF=");
+        tx_num(u, (int)shift_doff_dbg);
+        tx_puts(u, " AF=");
+        tx_num(u, (int)shift_af_dbg);
+        tx_puts(u, " CE=");
         tx_num(u, (int)(g_centering.e_cm * 10.0f));
         tx_puts(u, " CD=");
         tx_num(u, (int)(g_centering.delta_deg * 10.0f));
