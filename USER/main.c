@@ -46,7 +46,8 @@
 #define CENT_TEST_SPD      600      /* centering test base speed counts/20ms */
 #define CENT_TEST_CM       150u     /* centering test distance, cm */
 #define SHIFT_TEST_CM      260u     /* 220 ridge + 40 to the far corridor, cm */
-#define SHIFT_SPD          500      /* counts/20ms during the sideways shift */
+#define SHIFT_SPD          900      /* counts/20ms during the sideways shift */
+#define SHIFT_RAMP         25       /* speed ramp per 20ms tick               */
 #define SHIFT_WAIT_MS      600u     /* servo settle time */
 #define SHIFT_TIMEOUT_MS   45000u
 
@@ -60,7 +61,7 @@
 #define SHIFT_YAW_TARGET_MAX 5.0f    /* outer-loop yaw target clamp, deg         */
 /* aux ridge-side sensor: lateral offset = distance to the straddled ridge wall */
 #define RIDGE_TARGET_MM     148.0f   /* measured on-ridge distance 2026-11-21      */
-#define RIDGE_FF_DEG        6.0f     /* feed-forward crab angle (mechanical bias)    */
+#define RIDGE_FF_DEG        7.0f     /* feed-forward crab angle (mechanical bias)    */
 #define RIDGE_KI            0.008f   /* deg per (mm * s)                             */
 #define RIDGE_I_MAX         3.0f     /* integrator clamp, deg                        */
 #define RIDGE_OFFSET_MAX    18.0f    /* clamp, deg                                  */
