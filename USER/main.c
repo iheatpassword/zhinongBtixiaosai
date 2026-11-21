@@ -45,7 +45,7 @@
 #define RUN_TIMEOUT_MS     15000u
 #define CENT_TEST_SPD      600      /* centering test base speed counts/20ms */
 #define CENT_TEST_CM       150u     /* centering test distance, cm */
-#define SHIFT_TEST_CM      260u     /* 220 ridge + 40 to the far corridor, cm */
+#define SHIFT_TEST_CM      280u     /* fallback distance only; laser boundary stops first */
 #define SHIFT_SPD          1000     /* counts/20ms during the sideways shift */
 #define SHIFT_RAMP         25       /* speed ramp per 20ms tick               */
 #define SHIFT_WAIT_MS      600u     /* servo settle time */
@@ -53,7 +53,7 @@
 
 /* crab (进垄) closed-loop: yaw hold via front/rear toe, front-laser lateral hold */
 #define SHIFT_DF_TARGET_MM  240.0f   /* front laser to ridge wall when centred  */
-#define SHIFT_BOUNDARY_MM   70u      /* side laser <= this -> field boundary    */
+#define SHIFT_BOUNDARY_MM   60u      /* side laser <= this -> field boundary    */
 #define SHIFT_YAW_KP        2.2f     /* deg toe per deg yaw                     */
 #define SHIFT_YAW_KD        0.4f     /* deg toe per deg/s yaw rate              */
 #define SHIFT_DF_KI         0.0f     /* disabled: single front laser cannot centre */
@@ -61,7 +61,7 @@
 #define SHIFT_YAW_TARGET_MAX 5.0f    /* outer-loop yaw target clamp, deg         */
 /* aux ridge-side sensor: lateral offset = distance to the straddled ridge wall */
 #define RIDGE_TARGET_MM     148.0f   /* measured on-ridge distance 2026-11-21      */
-#define RIDGE_FF_DEG        7.0f     /* feed-forward crab angle (mechanical bias)    */
+#define RIDGE_FF_DEG        6.5f     /* B1: only FF 7.0 -> 6.5                     */
 #define RIDGE_KI            0.008f   /* deg per (mm * s)                             */
 #define RIDGE_I_MAX         3.0f     /* integrator clamp, deg                        */
 #define RIDGE_OFFSET_MAX    18.0f    /* clamp, deg                                  */
@@ -209,7 +209,12 @@ static void ms_init(void)
 /* ======================================================================= */
 static void tx_putc(USART_TypeDef *u, u8 b)
 {
-  while (USART_GetFlagStatus(u, USART_FLAG_TXE) == RESET) { }
+  u32 guard = 200000u;
+  while ((USART_GetFlagStatus(u, USART_FLAG_TXE) == RESET) && (guard > 0u))
+  {
+    guard--;
+  }
+  if (guard == 0u) return;          /* never hang the main loop on a stuck UART */
   USART_SendData(u, b);
 }
 
@@ -279,7 +284,14 @@ static void cmd_port_init(CmdPort *p, USART_TypeDef *u, DMA_Stream_TypeDef *s, u
 /* ======================================================================= */
 static void u2_putc(u8 b)
 {
-  while (USART_GetFlagStatus(USART2, USART_FLAG_TXE) == RESET) { }
+  {
+    u32 guard = 50000u;
+    while ((USART_GetFlagStatus(USART2, USART_FLAG_TXE) == RESET) && (guard > 0u))
+    {
+      guard--;
+    }
+    if (guard == 0u) return;      /* servo bus stuck: drop the byte, never hang */
+  }
   USART_SendData(USART2, b);
 }
 
@@ -507,6 +519,15 @@ static void show_signed(u8 x, u8 y, int32_t v, u8 digits)
   if (v < 0) { OLED_ShowString(x, y, (u8 *)"-"); v = -v; }
   else       { OLED_ShowString(x, y, (u8 *)"+"); }
   OLED_ShowNumber((u8)(x + 8u), y, (u32)v, digits, 12);
+}
+
+static void iwdg_init(void)
+{
+  IWDG->KR  = 0x5555u;   /* unlock PR/RLR */
+  IWDG->PR  = 0x04u;     /* LSI/64 = 500 Hz */
+  IWDG->RLR = 500u;      /* ~1 s */
+  IWDG->KR  = 0xAAAAu;   /* reload */
+  IWDG->KR  = 0xCCCCu;   /* start */
 }
 
 static void screen(void)
@@ -895,6 +916,39 @@ void App_SetSteer4(float fl, float fr, float rl, float rr)
 /* ======================================================================= */
 /*  main                                                                  */
 /* ======================================================================= */
+void Fault_Dump(void)
+{
+  tx_puts(UART5, "\r\nFAULT CFSR=");
+  tx_hexb(UART5, (u8)((SCB->CFSR >> 24) & 0xFFu)); tx_hexb(UART5, (u8)((SCB->CFSR >> 16) & 0xFFu));
+  tx_hexb(UART5, (u8)((SCB->CFSR >> 8) & 0xFFu));  tx_hexb(UART5, (u8)(SCB->CFSR & 0xFFu));
+  tx_puts(UART5, " HFSR=");
+  tx_hexb(UART5, (u8)((SCB->HFSR >> 24) & 0xFFu)); tx_hexb(UART5, (u8)((SCB->HFSR >> 16) & 0xFFu));
+  tx_hexb(UART5, (u8)((SCB->HFSR >> 8) & 0xFFu));  tx_hexb(UART5, (u8)(SCB->HFSR & 0xFFu));
+  tx_puts(UART5, " MMFAR=");
+  tx_hexb(UART5, (u8)((SCB->MMFAR >> 24) & 0xFFu)); tx_hexb(UART5, (u8)((SCB->MMFAR >> 16) & 0xFFu));
+  tx_hexb(UART5, (u8)((SCB->MMFAR >> 8) & 0xFFu));  tx_hexb(UART5, (u8)(SCB->MMFAR & 0xFFu));
+  tx_puts(UART5, " BFAR=");
+  tx_hexb(UART5, (u8)((SCB->BFAR >> 24) & 0xFFu)); tx_hexb(UART5, (u8)((SCB->BFAR >> 16) & 0xFFu));
+  tx_hexb(UART5, (u8)((SCB->BFAR >> 8) & 0xFFu));  tx_hexb(UART5, (u8)(SCB->BFAR & 0xFFu));
+  tx_puts(UART5, "\r\n");
+}
+
+static void boot_reset_report(void)
+{
+  u32 csr = RCC->CSR;
+
+  tx_puts(USART1, "RST:");
+  tx_puts(UART5,  "RST:");
+  if ((csr & (1u << 29)) != 0u) { tx_puts(USART1, "IWDG "); tx_puts(UART5, "IWDG "); }
+  if ((csr & (1u << 28)) != 0u) { tx_puts(USART1, "SW   "); tx_puts(UART5, "SW   "); }
+  if ((csr & (1u << 27)) != 0u) { tx_puts(USART1, "POR  "); tx_puts(UART5, "POR  "); }
+  if ((csr & (1u << 30)) != 0u) { tx_puts(USART1, "WWDG "); tx_puts(UART5, "WWDG "); }
+  if ((csr & (1u << 31)) != 0u) { tx_puts(USART1, "LPWR "); tx_puts(UART5, "LPWR "); }
+  tx_puts(USART1, "\r\n");
+  tx_puts(UART5,  "\r\n");
+  RCC_ClearFlag();
+}
+
 int main(void)
 {
   u32 next_ctrl;
@@ -928,6 +982,7 @@ int main(void)
   cmd_port_init(&port3, USART3, DMA1_Stream1, DMA_Channel_4);
   cmd_port_init(&port5, UART5, DMA1_Stream0, DMA_Channel_4);
 
+  boot_reset_report();
   tx_puts(USART1, "\r\nC30D speed-loop ready\r\n");
   tx_puts(USART3, "\r\nC30D speed-loop ready\r\n");
   tx_puts(UART5,  "\r\nC30D speed-loop ready\r\n");
@@ -935,6 +990,7 @@ int main(void)
   cmd_help(USART3);
   cmd_help(UART5);
 
+  iwdg_init();                 /* ~1 s watchdog: a hung loop resets the board */
   servo_broadcast_deg(0);
   run_target = (s32)((RUN_CM * 10.0f / (3.14159f * WHEEL_DIAMETER_MM)) * ENCODER_CPR);
   run_state = 0u;
@@ -950,6 +1006,7 @@ int main(void)
 
   while (1)
   {
+    IWDG->KR = 0xAAAAu;        /* feed the watchdog */
     now = ms_now();
 
     if (now >= next_ctrl)
@@ -1047,7 +1104,7 @@ int main(void)
               tx_puts(USART1, "SHIFT FRONT NEAR\r\n");
               tx_puts(UART5,  "SHIFT FRONT NEAR\r\n");
             }
-            else if (((u16)(App_GetDistanceCm() - shift_base_cm) > 30u) &&
+            else if (((u16)(App_GetDistanceCm() - shift_base_cm) > 50u) &&
                      (((g_laser.dL != 0xFFFFu) && (g_laser.dL <= SHIFT_BOUNDARY_MM)) ||
                       ((g_laser.dR != 0xFFFFu) && (g_laser.dR <= SHIFT_BOUNDARY_MM))))
             {
@@ -1227,7 +1284,9 @@ int main(void)
           tx_num(u, (int)pwm_out[w]);
           tx_putc(u, ' ');
         }
-        tx_puts(u, "RD=");
+        tx_puts(u, "DD=");
+        tx_num(u, (int)((u16)(App_GetDistanceCm() - shift_base_cm)));
+        tx_puts(u, " RD=");
         tx_num(u, (int)shift_ridge_dbg);
         tx_puts(u, " DF=");
         tx_num(u, (int)shift_doff_dbg);

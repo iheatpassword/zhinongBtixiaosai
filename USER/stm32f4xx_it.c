@@ -29,6 +29,8 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "stm32f4xx_it.h"
+
+void Fault_Dump(void);
  
 
 /** @addtogroup Template_Project
@@ -62,10 +64,8 @@ void NMI_Handler(void)
   */
 void HardFault_Handler(void)
 {
-  /* Go to infinite loop when Hard Fault exception occurs */
-  while (1)
-  {
-  }
+  Fault_Dump();
+  NVIC_SystemReset();   /* fault -> reset, motors stop */
 }
 
 /**
@@ -75,10 +75,8 @@ void HardFault_Handler(void)
   */
 void MemManage_Handler(void)
 {
-  /* Go to infinite loop when Memory Manage exception occurs */
-  while (1)
-  {
-  }
+  Fault_Dump();
+  NVIC_SystemReset();   /* fault -> reset, motors stop */
 }
 
 /**
@@ -88,10 +86,8 @@ void MemManage_Handler(void)
   */
 void BusFault_Handler(void)
 {
-  /* Go to infinite loop when Bus Fault exception occurs */
-  while (1)
-  {
-  }
+  Fault_Dump();
+  NVIC_SystemReset();   /* fault -> reset, motors stop */
 }
 
 /**
@@ -101,10 +97,8 @@ void BusFault_Handler(void)
   */
 void UsageFault_Handler(void)
 {
-  /* Go to infinite loop when Usage Fault exception occurs */
-  while (1)
-  {
-  }
+  Fault_Dump();
+  NVIC_SystemReset();   /* fault -> reset, motors stop */
 }
 
 ///**
