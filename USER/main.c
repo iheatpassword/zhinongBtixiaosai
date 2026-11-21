@@ -47,7 +47,7 @@
 #define CENT_TEST_SPD      600      /* centering test base speed counts/20ms */
 #define CENT_TEST_CM       150u     /* centering test distance, cm */
 #define SHIFT_TEST_CM      280u     /* fallback distance only; laser boundary stops first */
-#define SHIFT_SPD          2000     /* counts/20ms during the sideways shift */
+#define SHIFT_SPD          2200     /* counts/20ms during the sideways shift */
 #define SHIFT_RAMP         12       /* speed ramp per 20ms tick (soft start)  */
 #define SHIFT_WAIT_MS      600u     /* servo settle time */
 #define SHIFT_TIMEOUT_MS   45000u
@@ -289,7 +289,7 @@ static void cmd_port_init(CmdPort *p, USART_TypeDef *u, DMA_Stream_TypeDef *s, u
 static void u2_putc(u8 b)
 {
   {
-    u32 guard = 50000u;
+    u32 guard = 200000u;
     while ((USART_GetFlagStatus(USART2, USART_FLAG_TXE) == RESET) && (guard > 0u))
     {
       guard--;
@@ -1005,6 +1005,10 @@ int main(void)
 
   iwdg_init();                 /* ~1 s watchdog: a hung loop resets the board */
   servo_broadcast_deg(0);
+  delay_ms(50u);
+  servo_broadcast_deg(0);
+  delay_ms(50u);
+  servo_broadcast_deg(0);      /* repeat: a reset mid-shift must still centre the servos */
   run_target = (s32)((RUN_CM * 10.0f / (3.14159f * WHEEL_DIAMETER_MM)) * ENCODER_CPR);
   run_state = 0u;
   key_last = 0u;
