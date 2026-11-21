@@ -45,10 +45,10 @@
 #define RUN_TIMEOUT_MS     15000u
 #define CENT_TEST_SPD      600      /* centering test base speed counts/20ms */
 #define CENT_TEST_CM       150u     /* centering test distance, cm */
-#define SHIFT_TEST_CM      100u     /* crab (lane-entry) test distance, cm */
+#define SHIFT_TEST_CM      260u     /* 220 ridge + 40 to the far corridor, cm */
 #define SHIFT_SPD          500      /* counts/20ms during the sideways shift */
 #define SHIFT_WAIT_MS      600u     /* servo settle time */
-#define SHIFT_TIMEOUT_MS   15000u
+#define SHIFT_TIMEOUT_MS   45000u
 
 /* crab (进垄) closed-loop: yaw hold via front/rear toe, front-laser lateral hold */
 #define SHIFT_DF_TARGET_MM  240.0f   /* front laser to ridge wall when centred  */
@@ -60,11 +60,13 @@
 #define SHIFT_YAW_TARGET_MAX 5.0f    /* outer-loop yaw target clamp, deg         */
 /* aux ridge-side sensor: lateral offset = distance to the straddled ridge wall */
 #define RIDGE_TARGET_MM     148.0f   /* measured on-ridge distance 2026-11-21      */
-#define RIDGE_FF_DEG        8.0f     /* feed-forward crab angle (mechanical bias)    */
+#define RIDGE_FF_DEG        6.0f     /* feed-forward crab angle (mechanical bias)    */
 #define RIDGE_KI            0.008f   /* deg per (mm * s)                             */
-#define RIDGE_I_MAX         4.0f     /* integrator clamp, deg                        */
+#define RIDGE_I_MAX         3.0f     /* integrator clamp, deg                        */
 #define RIDGE_OFFSET_MAX    18.0f    /* clamp, deg                                  */
-#define RIDGE_DEADBAND_MM   12.0f    /* no integral update inside this band          */
+#define RIDGE_DEADBAND_MM   10.0f    /* no integral update inside this band          */
+#define RIDGE_VALID_MIN     60u      /* ignore dRidge outside 60..300 mm             */
+#define RIDGE_VALID_MAX     300u
 #define RIDGE_SIGN          (1.0f)   /* +delta moves the car TOWARD the ridge (verified) */
 #define RIDGE_BIAS_DEG      12.0f    /* fixed crab-angle offset for the bias test   */
 #define RIDGE_USE_BIAS      0u       /* 0 = closed loop (bias test finished)         */
@@ -976,17 +978,20 @@ int main(void)
             /* lateral offset from the aux ridge-side laser (direct measurement) */
             /* feed-forward mechanical crab angle + slow integral on ridge distance */
             doff = RIDGE_FF_DEG;
-            if ((g_laser.ridge_valid != 0u) && (g_laser.dRidge >= 30u) && (g_laser.dRidge <= 600u))
+            if ((g_laser.ridge_valid != 0u) &&
+                (g_laser.dRidge >= RIDGE_VALID_MIN) && (g_laser.dRidge <= RIDGE_VALID_MAX))
             {
+              float rerr = (float)g_laser.dRidge - RIDGE_TARGET_MM;
+              if ((rerr > RIDGE_DEADBAND_MM) || (rerr < -RIDGE_DEADBAND_MM))
               {
-                float rerr = (float)g_laser.dRidge - RIDGE_TARGET_MM;
-                if ((rerr > RIDGE_DEADBAND_MM) || (rerr < -RIDGE_DEADBAND_MM))
-                {
-                  ridge_integ += RIDGE_KI * rerr * 0.02f;
-                }
+                ridge_integ += RIDGE_KI * rerr * 0.02f;
               }
               if (ridge_integ >  RIDGE_I_MAX) ridge_integ =  RIDGE_I_MAX;
               if (ridge_integ < -RIDGE_I_MAX) ridge_integ = -RIDGE_I_MAX;
+            }
+            else
+            {
+              ridge_integ = 0.0f;   /* sensor sees nothing plausible: drop the windup */
             }
             doff += ridge_integ;
             if (doff >  RIDGE_OFFSET_MAX) doff =  RIDGE_OFFSET_MAX;
@@ -1041,8 +1046,9 @@ int main(void)
               tx_puts(USART1, "SHIFT FRONT NEAR\r\n");
               tx_puts(UART5,  "SHIFT FRONT NEAR\r\n");
             }
-            else if (((g_laser.dL != 0xFFFFu) && (g_laser.dL <= SHIFT_BOUNDARY_MM)) ||
-                     ((g_laser.dR != 0xFFFFu) && (g_laser.dR <= SHIFT_BOUNDARY_MM)))
+            else if (((u16)(App_GetDistanceCm() - shift_base_cm) > 30u) &&
+                     (((g_laser.dL != 0xFFFFu) && (g_laser.dL <= SHIFT_BOUNDARY_MM)) ||
+                      ((g_laser.dR != 0xFFFFu) && (g_laser.dR <= SHIFT_BOUNDARY_MM))))
             {
               shift_phase = 2u;
               App_DriveStop();
