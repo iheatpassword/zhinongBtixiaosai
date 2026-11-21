@@ -50,6 +50,21 @@
 #define SHIFT_WAIT_MS      600u     /* servo settle time */
 #define SHIFT_TIMEOUT_MS   15000u
 
+/* crab (进垄) closed-loop: yaw hold via front/rear toe, front-laser lateral hold */
+#define SHIFT_DF_TARGET_MM  240.0f   /* front laser to ridge wall when centred  */
+#define SHIFT_BOUNDARY_MM   70u      /* side laser <= this -> field boundary    */
+#define SHIFT_YAW_KP        2.2f     /* deg toe per deg yaw                     */
+#define SHIFT_YAW_KD        0.4f     /* deg toe per deg/s yaw rate              */
+#define SHIFT_DF_KP         0.03f    /* deg common offset per mm front-laser err */
+#define SHIFT_DF_KD         0.0f     /* no derivative (laser noise)              */
+#define SHIFT_TOE_MAX       8.0f     /* toe clamp, deg                          */
+#define SHIFT_DRIFT_MAX     6.0f     /* common offset clamp, deg                */
+#define SHIFT_TOE_SIGN      (-1.0f)  /* unused when speed-diff yaw hold is active */
+#define SHIFT_YAW_SPD_KP    40.0f    /* counts/20ms per deg yaw                   */
+#define SHIFT_YAW_SPD_KD    8.0f     /* counts/20ms per deg/s yaw rate            */
+#define SHIFT_YAW_SPD_MAX   250.0f   /* speed differential clamp                  */
+#define SHIFT_YAW_SPD_SIGN  (-1.0f)  /* flipped per bench test: + grew the drift   */
+
 /* ICM-20948 heading hold (onboard IMU, I2C) */
 #define GYRO_LSB_PER_DPS   65.5f
 #define GYRO_SIGN          (+1.0f)
@@ -117,6 +132,8 @@ static u32 shift_start_ms;
 static u32 shift_t0;
 static u16 shift_base_cm;
 static u8  shift_show;
+static float shift_df_prev;
+static u8  shift_df_prev_valid;
 static u16 cent_base_cm;     /* odometry baseline at test start */
 static u8  run_state;        /* 0 idle, 1 running, 2 done */
 static s32 run_counts;       /* average encoder counts travelled */
@@ -751,6 +768,9 @@ static void shift_start(void)
   shift_t0    = ms_now();
   shift_base_cm = App_GetDistanceCm();
   cent_show   = 0u;
+  yaw_deg     = 0.0f;
+  shift_df_prev = 0.0f;
+  shift_df_prev_valid = 0u;
   App_DriveStop();
   App_SetSteerAll(90.0f);        /* all four wheels crab 90 deg */
   tx_puts(USART1, "SHIFT START\r\n");
@@ -931,15 +951,56 @@ int main(void)
           else if (shift_phase == 1u)
           {
             s16 sp[4];
-            sp[0] = SHIFT_SPD; sp[1] = SHIFT_SPD;
-            sp[2] = SHIFT_SPD; sp[3] = SHIFT_SPD;
+            float r = gyro_z_dps() * GYRO_SIGN;
+            float doff = 0.0f;
+            float dferr, dnder;
+            float a;
+
+            if ((g_laser.dF != 0xFFFFu) && (g_laser.dF >= 80u) && (g_laser.dF <= 500u))
+            {
+              dferr = SHIFT_DF_TARGET_MM - (float)g_laser.dF;
+              if (shift_df_prev_valid != 0u) dnder = (float)g_laser.dF - shift_df_prev;
+              else                            dnder = 0.0f;
+              shift_df_prev = (float)g_laser.dF;
+              shift_df_prev_valid = 1u;
+              doff = SHIFT_DF_KP * dferr - SHIFT_DF_KD * 50.0f * dnder;
+              if (doff >  SHIFT_DRIFT_MAX) doff =  SHIFT_DRIFT_MAX;
+              if (doff < -SHIFT_DRIFT_MAX) doff = -SHIFT_DRIFT_MAX;
+            }
+
+            /* yaw hold through a front/rear wheel speed differential (tank style) */
+            {
+              float cy = SHIFT_YAW_SPD_KP * yaw_deg + SHIFT_YAW_SPD_KD * r;
+              if (cy >  SHIFT_YAW_SPD_MAX) cy =  SHIFT_YAW_SPD_MAX;
+              if (cy < -SHIFT_YAW_SPD_MAX) cy = -SHIFT_YAW_SPD_MAX;
+              cy *= SHIFT_YAW_SPD_SIGN;
+
+              a = 90.0f + doff;
+              App_SetSteer4(a, a, a, a);
+
+              sp[0] = (s16)(SHIFT_SPD - cy);   /* front-left  */
+              sp[1] = (s16)(SHIFT_SPD - cy);   /* front-right */
+              sp[2] = (s16)(SHIFT_SPD + cy);   /* rear-left   */
+              sp[3] = (s16)(SHIFT_SPD + cy);   /* rear-right  */
+            }
             App_SetWheelSpeed(sp);
+
             if ((u16)(App_GetDistanceCm() - shift_base_cm) >= SHIFT_TEST_CM)
             {
               shift_phase = 2u;
               App_DriveStop();
               App_SetServoCenter();
               shift_t0 = ms_now();
+            }
+            else if (((g_laser.dL != 0xFFFFu) && (g_laser.dL <= SHIFT_BOUNDARY_MM)) ||
+                     ((g_laser.dR != 0xFFFFu) && (g_laser.dR <= SHIFT_BOUNDARY_MM)))
+            {
+              shift_phase = 2u;
+              App_DriveStop();
+              App_SetServoCenter();
+              shift_t0 = ms_now();
+              tx_puts(USART1, "SHIFT BOUNDARY\r\n");
+              tx_puts(UART5,  "SHIFT BOUNDARY\r\n");
             }
           }
           else
