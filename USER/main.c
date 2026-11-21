@@ -47,7 +47,7 @@
 #define CENT_TEST_SPD      600      /* centering test base speed counts/20ms */
 #define CENT_TEST_CM       150u     /* centering test distance, cm */
 #define SHIFT_TEST_CM      280u     /* fallback distance only; laser boundary stops first */
-#define SHIFT_SPD          1700     /* counts/20ms during the sideways shift */
+#define SHIFT_SPD          1800     /* counts/20ms during the sideways shift */
 #define SHIFT_RAMP         12       /* speed ramp per 20ms tick (soft start)  */
 #define SHIFT_WAIT_MS      600u     /* servo settle time */
 #define SHIFT_TIMEOUT_MS   45000u
