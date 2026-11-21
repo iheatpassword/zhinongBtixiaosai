@@ -46,7 +46,7 @@
 #define CENT_TEST_SPD      600      /* centering test base speed counts/20ms */
 #define CENT_TEST_CM       150u     /* centering test distance, cm */
 #define SHIFT_TEST_CM      280u     /* fallback distance only; laser boundary stops first */
-#define SHIFT_SPD          1000     /* counts/20ms during the sideways shift */
+#define SHIFT_SPD          1100     /* counts/20ms during the sideways shift */
 #define SHIFT_RAMP         25       /* speed ramp per 20ms tick               */
 #define SHIFT_WAIT_MS      600u     /* servo settle time */
 #define SHIFT_TIMEOUT_MS   45000u
@@ -77,7 +77,7 @@
 #define SHIFT_TOE_SIGN      (-1.0f)  /* unused when speed-diff yaw hold is active */
 #define SHIFT_YAW_SPD_KP    40.0f    /* counts/20ms per deg yaw                   */
 #define SHIFT_YAW_SPD_KD    8.0f     /* counts/20ms per deg/s yaw rate            */
-#define SHIFT_YAW_SPD_MAX   250.0f   /* speed differential clamp                  */
+#define SHIFT_YAW_SPD_MAX   150.0f   /* speed differential clamp                  */
 #define SHIFT_YAW_SPD_SIGN  (-1.0f)  /* flipped per bench test: + grew the drift   */
 
 /* ICM-20948 heading hold (onboard IMU, I2C) */
@@ -153,6 +153,8 @@ static s16 shift_ridge_dbg;
 static float shift_yaw_target;
 static float shift_df_filt;
 static float ridge_integ;
+static u16 shift_yaw_fault_cnt;
+static u32 next_heartbeat;
 static u16 cent_base_cm;     /* odometry baseline at test start */
 static u8  run_state;        /* 0 idle, 1 running, 2 done */
 static s32 run_counts;       /* average encoder counts travelled */
@@ -942,8 +944,17 @@ static void boot_reset_report(void)
   if ((csr & (1u << 29)) != 0u) { tx_puts(USART1, "IWDG "); tx_puts(UART5, "IWDG "); }
   if ((csr & (1u << 28)) != 0u) { tx_puts(USART1, "SW   "); tx_puts(UART5, "SW   "); }
   if ((csr & (1u << 27)) != 0u) { tx_puts(USART1, "POR  "); tx_puts(UART5, "POR  "); }
+  if ((csr & (1u << 26)) != 0u) { tx_puts(USART1, "PIN  "); tx_puts(UART5, "PIN  "); }
+  if ((csr & (1u << 25)) != 0u) { tx_puts(USART1, "BOR  "); tx_puts(UART5, "BOR  "); }
+  if ((csr & (1u << 24)) != 0u) { tx_puts(USART1, "PDR  "); tx_puts(UART5, "PDR  "); }
   if ((csr & (1u << 30)) != 0u) { tx_puts(USART1, "WWDG "); tx_puts(UART5, "WWDG "); }
   if ((csr & (1u << 31)) != 0u) { tx_puts(USART1, "LPWR "); tx_puts(UART5, "LPWR "); }
+  tx_puts(USART1, " CSR=");
+  tx_puts(UART5,  " CSR=");
+  tx_hexb(USART1, (u8)((csr >> 24) & 0xFFu)); tx_hexb(USART1, (u8)((csr >> 16) & 0xFFu));
+  tx_hexb(USART1, (u8)((csr >> 8) & 0xFFu));  tx_hexb(USART1, (u8)(csr & 0xFFu));
+  tx_hexb(UART5,  (u8)((csr >> 24) & 0xFFu)); tx_hexb(UART5, (u8)((csr >> 16) & 0xFFu));
+  tx_hexb(UART5,  (u8)((csr >> 8) & 0xFFu));  tx_hexb(UART5, (u8)(csr & 0xFFu));
   tx_puts(USART1, "\r\n");
   tx_puts(UART5,  "\r\n");
   RCC_ClearFlag();
@@ -1000,6 +1011,7 @@ int main(void)
   speed_reset();
   delay_ms(500u);
 
+  next_heartbeat = ms_now() + 250u;
   next_ctrl   = ms_now();
   next_screen = ms_now();
   next_log    = ms_now() + 1000u;
@@ -1008,6 +1020,12 @@ int main(void)
   {
     IWDG->KR = 0xAAAAu;        /* feed the watchdog */
     now = ms_now();
+
+    if (now >= next_heartbeat)
+    {
+      next_heartbeat += 250u;
+      GPIO_ToggleBits(GPIOE, GPIO_Pin_8);   /* V1.1 on-board LED: system heartbeat */
+    }
 
     if (now >= next_ctrl)
     {
@@ -1087,6 +1105,24 @@ int main(void)
             sp[2] = (s16)(SHIFT_SPD + cy);   /* rear-left   */
             sp[3] = (s16)(SHIFT_SPD + cy);   /* rear-right  */
             App_SetWheelSpeed(sp);
+
+            if ((yaw_deg > 12.0f) || (yaw_deg < -12.0f))
+            {
+              shift_yaw_fault_cnt++;
+              if (shift_yaw_fault_cnt > 15u)
+              {
+                shift_phase = 2u;
+                App_DriveStop();
+                App_SetServoCenter();
+                shift_t0 = ms_now();
+                tx_puts(USART1, "SHIFT YAW FAULT\r\n");
+                tx_puts(UART5,  "SHIFT YAW FAULT\r\n");
+              }
+            }
+            else
+            {
+              shift_yaw_fault_cnt = 0u;
+            }
 
             if ((u16)(App_GetDistanceCm() - shift_base_cm) >= SHIFT_TEST_CM)
             {
