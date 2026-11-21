@@ -59,10 +59,15 @@
 #define SHIFT_DF_LOOP_SIGN  (-1.0f)  /* flipped per bench: +1 drove the wrong way */
 #define SHIFT_YAW_TARGET_MAX 5.0f    /* outer-loop yaw target clamp, deg         */
 /* aux ridge-side sensor: lateral offset = distance to the straddled ridge wall */
-#define RIDGE_TARGET_MM     120.0f   /* calibrated distance when the car is centred */
-#define RIDGE_KP            0.05f    /* deg common steering offset per mm error     */
-#define RIDGE_OFFSET_MAX    6.0f     /* clamp, deg                                  */
-#define RIDGE_SIGN          (1.0f)   /* flip if the car moves the wrong way         */
+#define RIDGE_TARGET_MM     148.0f   /* measured on-ridge distance 2026-11-21      */
+#define RIDGE_FF_DEG        8.0f     /* feed-forward crab angle (mechanical bias)    */
+#define RIDGE_KI            0.008f   /* deg per (mm * s)                             */
+#define RIDGE_I_MAX         4.0f     /* integrator clamp, deg                        */
+#define RIDGE_OFFSET_MAX    18.0f    /* clamp, deg                                  */
+#define RIDGE_DEADBAND_MM   12.0f    /* no integral update inside this band          */
+#define RIDGE_SIGN          (1.0f)   /* +delta moves the car TOWARD the ridge (verified) */
+#define RIDGE_BIAS_DEG      12.0f    /* fixed crab-angle offset for the bias test   */
+#define RIDGE_USE_BIAS      0u       /* 0 = closed loop (bias test finished)         */
 #define SHIFT_DF_FILT_ALPHA  0.3f    /* low-pass on dF                           */
 #define SHIFT_TOE_MAX       8.0f     /* toe clamp, deg                          */
 #define SHIFT_DRIFT_MAX     8.0f     /* common offset clamp, deg                */
@@ -141,8 +146,10 @@ static u16 shift_base_cm;
 static u8  shift_show;
 static s16 shift_doff_dbg;
 static s16 shift_af_dbg;
+static s16 shift_ridge_dbg;
 static float shift_yaw_target;
 static float shift_df_filt;
+static float ridge_integ;
 static u16 cent_base_cm;     /* odometry baseline at test start */
 static u8  run_state;        /* 0 idle, 1 running, 2 done */
 static s32 run_counts;       /* average encoder counts travelled */
@@ -780,6 +787,7 @@ static void shift_start(void)
   yaw_deg     = 0.0f;
   shift_yaw_target = 0.0f;
   shift_df_filt = 0.0f;
+  ridge_integ = 0.0f;
   App_DriveStop();
   App_SetSteerAll(90.0f);        /* all four wheels crab 90 deg */
   tx_puts(USART1, "SHIFT START\r\n");
@@ -966,13 +974,24 @@ int main(void)
             float cy, yaw_err;
 
             /* lateral offset from the aux ridge-side laser (direct measurement) */
+            /* feed-forward mechanical crab angle + slow integral on ridge distance */
+            doff = RIDGE_FF_DEG;
             if ((g_laser.ridge_valid != 0u) && (g_laser.dRidge >= 30u) && (g_laser.dRidge <= 600u))
             {
-              doff = RIDGE_SIGN * RIDGE_KP *
-                     ((float)g_laser.dRidge - RIDGE_TARGET_MM);
-              if (doff >  RIDGE_OFFSET_MAX) doff =  RIDGE_OFFSET_MAX;
-              if (doff < -RIDGE_OFFSET_MAX) doff = -RIDGE_OFFSET_MAX;
+              {
+                float rerr = (float)g_laser.dRidge - RIDGE_TARGET_MM;
+                if ((rerr > RIDGE_DEADBAND_MM) || (rerr < -RIDGE_DEADBAND_MM))
+                {
+                  ridge_integ += RIDGE_KI * rerr * 0.02f;
+                }
+              }
+              if (ridge_integ >  RIDGE_I_MAX) ridge_integ =  RIDGE_I_MAX;
+              if (ridge_integ < -RIDGE_I_MAX) ridge_integ = -RIDGE_I_MAX;
             }
+            doff += ridge_integ;
+            if (doff >  RIDGE_OFFSET_MAX) doff =  RIDGE_OFFSET_MAX;
+            if (doff < 0.0f) doff = 0.0f;
+            shift_ridge_dbg = (s16)(doff * 10.0f);
             a = 90.0f + doff;
 
             /* outer loop: front-laser distance -> slow heading target so that
@@ -1201,7 +1220,9 @@ int main(void)
           tx_num(u, (int)pwm_out[w]);
           tx_putc(u, ' ');
         }
-        tx_puts(u, "DF=");
+        tx_puts(u, "RD=");
+        tx_num(u, (int)shift_ridge_dbg);
+        tx_puts(u, " DF=");
         tx_num(u, (int)shift_doff_dbg);
         tx_puts(u, " AF=");
         tx_num(u, (int)shift_af_dbg);
