@@ -25,6 +25,7 @@
   * the FreeRTOS scheduler is NOT started.
   */
 #include "system.h"
+#include "adc.h"
 #include "app_if.h"
 #include "laser.h"
 #include "centering.h"
@@ -153,6 +154,7 @@ static s16 shift_ridge_dbg;
 static float shift_yaw_target;
 static float shift_df_filt;
 static float ridge_integ;
+static float batt_volt;
 static u16 shift_yaw_fault_cnt;
 static u32 next_heartbeat;
 static u16 cent_base_cm;     /* odometry baseline at test start */
@@ -1279,6 +1281,14 @@ int main(void)
       run_stop("70CM TIMEOUT");
     }
 
+    if ((batt_volt > 3.0f) && (batt_volt < 10.5f) && (motor_run != 0))
+    {
+      motor_run = 0;
+      speed_reset();
+      App_DriveStop();
+      tx_puts(UART5, "LOW BATT STOP\r\n");
+    }
+
     if ((cent_mode == 0u) && (shift_mode == 0u) && (run_state != 1u) &&
         (fsm_active() == 0u) && (motor_run != 0) &&
         ((ms_now() - last_cmd_ms) > CMD_TIMEOUT_MS))
@@ -1320,7 +1330,10 @@ int main(void)
           tx_num(u, (int)pwm_out[w]);
           tx_putc(u, ' ');
         }
-        tx_puts(u, "DD=");
+        batt_volt = (float)Get_Adc(9) * 3.3f * 11.0f * 0.99f / 4096.0f;
+        tx_puts(u, "VB=");
+        tx_num(u, (int)(batt_volt * 10.0f));
+        tx_puts(u, " DD=");
         tx_num(u, (int)((u16)(App_GetDistanceCm() - shift_base_cm)));
         tx_puts(u, " RD=");
         tx_num(u, (int)shift_ridge_dbg);
