@@ -47,14 +47,14 @@
 #define CENT_TEST_SPD      600      /* centering test base speed counts/20ms */
 #define CENT_TEST_CM       150u     /* centering test distance, cm */
 #define SHIFT_TEST_CM      280u     /* fallback distance only; laser boundary stops first */
-#define SHIFT_SPD          2400     /* counts/20ms during the sideways shift */
+#define SHIFT_SPD          3000     /* counts/20ms during the sideways shift */
 #define SHIFT_RAMP         12       /* speed ramp per 20ms tick (soft start)  */
 #define SHIFT_WAIT_MS      600u     /* servo settle time */
 #define SHIFT_TIMEOUT_MS   45000u
 
 /* crab (进垄) closed-loop: yaw hold via front/rear toe, front-laser lateral hold */
 #define SHIFT_DF_TARGET_MM  240.0f   /* front laser to ridge wall when centred  */
-#define SHIFT_BOUNDARY_MM   100u     /* side laser <= this -> field boundary    */
+#define SHIFT_BOUNDARY_MM   150u     /* side laser <= this -> field boundary    */
 #define SHIFT_YAW_KP        2.2f     /* deg toe per deg yaw                     */
 #define SHIFT_YAW_KD        0.4f     /* deg toe per deg/s yaw rate              */
 #define SHIFT_DF_KI         0.0f     /* disabled: single front laser cannot centre */
