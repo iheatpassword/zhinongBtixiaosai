@@ -54,7 +54,7 @@
 
 /* crab (进垄) closed-loop: yaw hold via front/rear toe, front-laser lateral hold */
 #define SHIFT_DF_TARGET_MM  240.0f   /* front laser to ridge wall when centred  */
-#define SHIFT_BOUNDARY_MM   90u      /* side laser <= this -> field boundary    */
+#define SHIFT_BOUNDARY_MM   100u     /* side laser <= this -> field boundary    */
 #define SHIFT_YAW_KP        2.2f     /* deg toe per deg yaw                     */
 #define SHIFT_YAW_KD        0.4f     /* deg toe per deg/s yaw rate              */
 #define SHIFT_DF_KI         0.0f     /* disabled: single front laser cannot centre */
@@ -62,7 +62,7 @@
 #define SHIFT_YAW_TARGET_MAX 5.0f    /* outer-loop yaw target clamp, deg         */
 /* aux ridge-side sensor: lateral offset = distance to the straddled ridge wall */
 #define RIDGE_TARGET_MM     148.0f   /* measured on-ridge distance 2026-11-21      */
-#define RIDGE_FF_DEG        6.5f     /* B1: only FF 7.0 -> 6.5                     */
+#define RIDGE_FF_DEG        7.5f     /* 2200: still far -> FF 7.5                  */
 #define RIDGE_KI            0.008f   /* deg per (mm * s)                             */
 #define RIDGE_I_MAX         3.0f     /* integrator clamp, deg                        */
 #define RIDGE_OFFSET_MAX    18.0f    /* clamp, deg                                  */
