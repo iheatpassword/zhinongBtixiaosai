@@ -47,7 +47,7 @@
 #define CENT_TEST_SPD      600      /* centering test base speed counts/20ms */
 #define CENT_TEST_CM       150u     /* centering test distance, cm */
 #define SHIFT_TEST_CM      280u     /* fallback distance only; laser boundary stops first */
-#define SHIFT_SPD          3000     /* counts/20ms during the sideways shift */
+#define SHIFT_SPD          3200     /* counts/20ms during the sideways shift */
 #define SHIFT_RAMP         12       /* speed ramp per 20ms tick (soft start)  */
 #define SHIFT_WAIT_MS      600u     /* servo settle time */
 #define SHIFT_TIMEOUT_MS   45000u
@@ -63,7 +63,7 @@
 /* aux ridge-side sensor: lateral offset = distance to the straddled ridge wall */
 #define RIDGE_TARGET_MM     148.0f   /* measured on-ridge distance 2026-11-21      */
 #define RIDGE_FF_DEG        7.5f     /* 2200: still far -> FF 7.5                  */
-#define RIDGE_KI            0.008f   /* deg per (mm * s)                             */
+#define RIDGE_KI            0.004f   /* 3200: overshoot -> halve the integral gain  */
 #define RIDGE_I_MAX         3.0f     /* integrator clamp, deg                        */
 #define RIDGE_OFFSET_MAX    18.0f    /* clamp, deg                                  */
 #define RIDGE_DEADBAND_MM   10.0f    /* no integral update inside this band          */
