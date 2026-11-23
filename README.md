@@ -43,7 +43,7 @@ $proj='C:\Users\iheat\Desktop\smart wheels2\C30D_MotorTest\USER\WHEELTEC.uvprojx
 
 ## 串口指令（摘要）
 
-`A` 启动 FSM2、`E` 贴边、`Q` 中止、`K kp ki kd max` 在线调差速 PID、
+`A` 启动 FSM2、`E` 贴边、`Q` 中止、`K kp ki kd max [ff]` 在线调差速 PID、
 `D+/D-` 差速标定、`P/M` 转向标定、`F/B/S` 前进/后退/停车、`T/T-/C` 舵机、
 `H` 帮助。完整列表见 **[HANDOVER.md](HANDOVER.md)**。
 

@@ -192,6 +192,7 @@ static s16 diff_test_pwm = 2500;
 static u8  edge_mode;
 static float edge_yaw_i;
 static float diff_kp = 2.0f, diff_ki = 0.5f, diff_kd = 0.0f, diff_max = 150.0f;
+static float diff_ff = 0.0f;   /* constant left/right offset, counts      */
 static float diff_i;
 static u8  diff_cal_mode;
 static s8  diff_cal_dir;
@@ -829,6 +830,7 @@ static void cmd_help(USART_TypeDef *u)
   tx_puts(u, "N       : centering straight test (2.5 m, needs laser)\r\n");
   tx_puts(u, "A       : start autonomous competition FSM\r\n");
   tx_puts(u, "Q       : abort FSM / reset to IDLE\r\n");
+  tx_puts(u, "K       : diff PID: K kp ki kd max [ff] (kp/ki/kd x100)\r\n");
   tx_puts(u, "T / T-  : servos +90 / -90 deg (broadcast)\r\n");
   tx_puts(u, "C       : servos centre\r\n");
   tx_puts(u, "H / ?   : help\r\n");
@@ -1001,6 +1003,11 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
     diff_ki  = (float)parse_next(&q) / 100.0f;
     diff_kd  = (float)parse_next(&q) / 100.0f;
     diff_max = (float)parse_next(&q);
+    {
+      const char *p = q;
+      while (*p == ' ') p++;
+      if (*p != '\0') diff_ff = (float)parse_next(&q);  /* optional 5th, counts */
+    }
     tx_puts(u, "OK K\r\n");
   }
   else if (c[0] == 'D')
@@ -1773,7 +1780,7 @@ int main(void)
             if (diff_i >  diff_max) diff_i =  diff_max;
             if (diff_i < -diff_max) diff_i = -diff_max;
 
-            corr = diff_kp * yaw_deg + diff_i + diff_kd * rate2;
+            corr = diff_ff + diff_kp * yaw_deg + diff_i + diff_kd * rate2;
             if (corr >  diff_max) corr =  diff_max;
             if (corr < -diff_max) corr = -diff_max;
 
@@ -1872,7 +1879,7 @@ int main(void)
                     diff_i += diff_ki * yaw_deg * 0.02f;
                     if (diff_i >  diff_max) diff_i =  diff_max;
                     if (diff_i < -diff_max) diff_i = -diff_max;
-                    c2 = diff_kp * yaw_deg + diff_i + diff_kd * r2;
+                    c2 = diff_ff + diff_kp * yaw_deg + diff_i + diff_kd * r2;
                     if (c2 >  diff_max) c2 =  diff_max;
                     if (c2 < -diff_max) c2 = -diff_max;
                     /* left/right differential: 0=LF 1=RF 2=LB 3=RB */
@@ -2117,6 +2124,8 @@ int main(void)
         tx_num(u, (int)(yaw_deg * 10.0f));
         tx_puts(u, " C=");
         tx_num(u, yaw_corr);
+        tx_puts(u, " FF=");
+        tx_num(u, (int)diff_ff);
         tx_puts(u, " SVO=");
         tx_num(u, (int)servo_angle);
         tx_puts(u, " P=");
