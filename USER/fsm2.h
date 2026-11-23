@@ -1,10 +1,13 @@
 /**
   * @file    fsm2.h
-  * @brief   ¢ҵ״̬߼ģ飬κ�?  *
-  *  Ŀƽ̨: STM32F407 + Keil MDK / ARMCC5C90޶̬ڴ�?printf
+  * @brief   ¢ҵ״̬߼ģ飬κӲ
+  *
+  *  Ŀƽ̨: STM32F407 + Keil MDK / ARMCC5C90޶̬ڴ棬 printf
   *  ģֻ Fsm2Input ͼ Fsm2OutputIMU ջ
-  *  ȫⲿִв�?  *
-  *  붯�?  *  --------------
+  *  ȫⲿִвɡ
+  *
+  *  붯ģ
+  *  --------------
   *  5 ¢ÿ 220 cm¢ࣨ¢ľࣩ70 cm
   *  ʼմֱ¢ת
   *    - ǰ / ֶ 0 ȣشֱ¢ķƶ
@@ -38,7 +41,8 @@
   *     ͣȽЧ FAULT IMU / Ҽ
   *   - Ӳȫ: stall = 1һ·Ч < 50 mm ->  FAULT
   *   - оڡ·Чоݣ⵽˲䶪󱨡
-  *   - ߽缤Чʱֻ�?260 cm ףⱨ�?  *
+  *   - ߽缤Чʱֻʣ 260 cm ףⱨϡ
+  *
   *  ִвԼ
   *  ----------------
   *   - request_stop = 1ִвͣ/֣Ҫִб tick  action
@@ -46,10 +50,11 @@
   *       action = STOPrequest_stop = 1 steer_deg е½Ƕȣ
   *       öתλͣȺٿʼ¶ENTRY ȴǰ
   *   - action = F2A_CRAB_R / F2A_CRAB_L ʱ steer_deg = +90 / -90
-  *     СǶ΢�?centering / safety ģ�?dF/dB ںɣ
+  *     СǶ΢ⲿ centering / safety ģ鰴 dF/dB ںɣ
   *     ģֻͣоݡ
   *   - action = F2A_REV ʱ target_cm ǡ X cmͼ
-  *     IMU ֺⲿִ�?  *
+  *     IMU ֺⲿִС
+  *
   *  ÷ 20 ms ڣ
   *  ---------------------------
   *      Fsm2_Init();
@@ -62,8 +67,8 @@
   *        ...  out  ...
   *      }
   *
-  *  : GBK/ANSI�?system.h һ£벿�?ASCII
-  *         UTF-8 ༭򿪳룬�?GBK/ANSI ´򿪡
+  *  : GBK/ANSI빤 system.h һ£벿ִ ASCII
+  *         UTF-8 ༭򿪳룬밴 GBK/ANSI ´򿪡
   */
 #ifndef __FSM2_H
 #define __FSM2_H
@@ -72,11 +77,11 @@
 
 /* ======================================================================= */
 /*  ֳɵλ: mm / cm / ms                                     */
-/*  ע: Ŀ 6 ԭ F2_ ǰ׺�?      */
-/*      safety.h ĺֻ±룬ض�?         */
+/*  ע: Ŀ 6 ԭ F2_ ǰ׺빤       */
+/*      safety.h ĺֻ±룬ض߼          */
 /* ======================================================================= */
 
-/* ENTRY: ǰ�?1 ¢ֵͣ, mm */
+/* ENTRY: ǰ⵽ 1 ¢ֵͣ, mm */
 #define ENTRY_STOP_MM            206u
 
 /* ENTRY : dF һֱЧʱǰô cm Ҳ CRAB_R1 */
@@ -91,7 +96,7 @@
 /* ¢, cmֶ 0 ȣ */
 #define REV_RIDGE_CM             70u
 
-/* �? cm */
+/* ⵹, cm */
 #define REV_PARK_CM              100u
 
 /* ʱ, msǰ 30 sз /  60 s */
@@ -112,17 +117,17 @@
 #define F2_SETTLE_MS             600u
 
 /* һ˲: ÿ tick ֵȨ 1/(1<<F2_FILTER_SHIFT)Ĭ 1/4
-   ˲ֵֻں eͣоԭʼֵ˲ͺ߽�?*/
+   ˲ֵֻں eͣоԭʼֵ˲ͺ߽硣 */
 #define F2_FILTER_SHIFT          2u
 
-/*  tick 䳬ֵΪⲿ / 쳣ȡ�? cm */
+/*  tick 䳬ֵΪⲿ / 쳣ȡ׼, cm */
 #define F2_DIST_JUMP_MAX_CM      30u
 
 /* Ƕ, ȡ */
 #define F2_STEER_STRAIGHT_DEG    0
 #define F2_STEER_CRAB_DEG        90
 
-/* ں:  safety.h  CRAB_ERR_SIGN һ£ֳ෴�?-1
+/* ں:  safety.h  CRAB_ERR_SIGN һ£ֳ෴ɸ -1
    e > 0 ʾʵڱֵò¢ƫԶϡ */
 #define F2_CRAB_ERR_SIGN         (+1)
 
@@ -137,7 +142,7 @@
 #define F2_FAULT_NEAR_R          5u   /* dR Ч < 50 mm                 */
 #define F2_FAULT_NO_LATERAL      6u   /* зʱ dF / dB ·Ч         */
 #define F2_FAULT_TIMEOUT         7u   /* ǰ״̬ʱ                      */
-#define F2_FAULT_ABORT           8u   /* �?Fsm2_Abort()             */
+#define F2_FAULT_ABORT           8u   /* ⲿ Fsm2_Abort()             */
 
 /* ======================================================================= */
 /*  ״̬ݽӿ                                                         */
@@ -157,10 +162,11 @@ typedef struct
 {
   u16 dF, dB, dL, dR;      /* mm, 0xFFFF = invalid                    */
   u8  vF, vB, vL, vR;      /* 1 = validʱ / ʱɵ 0*/
-  s32 dist_cm;             /* , cmۼֵʼʱ�?                              ģ״̬ / ͣȽʱȡ׼ dist0
+  s32 dist_cm;             /* , cmۼֵʼʱ㣬
+                              ģ״̬ / ͣȽʱȡ׼ dist0
                                |dist_cm - dist0| Ƴ̣ҲƳ      */
   float yaw_deg;           /* IMU , degģ鲻ʹãϲ㣩*/
-  u8  stall;               /* 1 = ת�?safety ģ     */
+  u8  stall;               /* 1 = תⲿ safety ģ     */
   u32 ms;                  /* 1 ms ɼʱ              */
 } Fsm2Input;
 
@@ -169,7 +175,7 @@ typedef enum { F2A_STOP=0, F2A_FWD, F2A_REV, F2A_CRAB_R, F2A_CRAB_L } Fsm2Action
 typedef struct
 {
   Fsm2Action action;
-  u16 target_cm;           /* ζĿ�?70/100зж 260*/
+  u16 target_cm;           /* ζĿ루 70/100зж 260*/
   u16 stop_mm;             /* ֵͣз 100ǰ 206        */
   s16 steer_deg;           /* Ƕȣ0+90-90                     */
   u8  request_stop;        /* 1 = Ҫͣ action ִУ    */
@@ -184,14 +190,15 @@ typedef struct
 void Fsm2_Init(void);
 
 /* : ֻ IDLE / DONE / FAULT ãеñԡ
-    FAULT 벢¿�?*/
+    FAULT 벢¿ʼ */
 void Fsm2_Start(void);
 
-/* ֹ:  F2_FAULT 棨й�?   Ҫ Fsm2_Start()  Fsm2_Init() ˳ FAULT */
+/* ֹ:  F2_FAULT 棨йͣ
+   Ҫ Fsm2_Start()  Fsm2_Init() ˳ FAULT */
 void Fsm2_Abort(void);
 
 /* ڵã 20 msin / out Ϊָʱȫأ
-   out Ϊֱӷأin Ϊʱֻͣı䵱ǰ״�?*/
+   out Ϊֱӷأin Ϊʱֻͣı䵱ǰ״̬ */
 void Fsm2_Tick(const Fsm2Input *in, Fsm2Output *out);
 
 /* ǰ״̬ */
@@ -202,7 +209,7 @@ const char *Fsm2_StateName(Fsm2State s);
 
 /* ---- ΪֳõֻϽӿڣӰ״̬Ǩƣ ---- */
 
-/* һι�?F2_FAULT_xxx0 = ޹ϡ */
+/* һι룬 F2_FAULT_xxx0 = ޹ϡ */
 u8 Fsm2_GetFaultCode(void);
 
 /* ǰѾߵľ, cmͣȱڼΪ 0 */
