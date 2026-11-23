@@ -1945,8 +1945,13 @@ int main(void)
       }
       else if (ev == 3u)
       {
-        abort_all();               /* also clears wheel_test_mode */
-        tx_puts(UART5, "ABORT\r\n");
+        /* 3-click stop removed per request 2026-11-23; keep only a way out
+           of the single-wheel test (otherwise that mode would need a reset). */
+        if (wheel_test_mode != 0u)
+        {
+          abort_all();             /* also clears wheel_test_mode */
+          tx_puts(UART5, "WHEEL TEST EXIT\r\n");
+        }
       }
       else if (ev == 4u)
       {
