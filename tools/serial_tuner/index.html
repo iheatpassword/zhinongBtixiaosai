@@ -165,18 +165,18 @@
         </div>
         <form id="kForm" class="param-form" autocomplete="off">
           <div class="form-grid">
-            <label>Kp <input id="kpInput" type="number" step="0.01" min="0" value="2.0"><em>×100</em></label>
-            <label>Ki <input id="kiInput" type="number" step="0.01" min="0" value="0.5"><em>×100</em></label>
+            <label>Kp <input id="kpInput" type="number" step="0.01" min="0" value="1.0"><em>×100</em></label>
+            <label>Ki <input id="kiInput" type="number" step="0.01" min="0" value="0"><em>×100</em></label>
             <label>Kd <input id="kdInput" type="number" step="0.01" min="0" value="0"><em>×100</em></label>
-            <label>max <input id="kmaxInput" type="number" step="1" min="0" value="150"><em>直接</em></label>
+            <label>max <input id="kmaxInput" type="number" step="1" min="0" value="600"><em>直接</em></label>
           </div>
           <div class="form-actions">
             <button class="btn primary" id="btnSendK" type="submit">发送 K 参数</button>
-            <code id="kPreview">K 200 50 0 150</code>
+            <code id="kPreview">K 100 0 0 600</code>
           </div>
           <p class="note">
             固件格式 <code>K kp ki kd max</code>（kp/ki/kd 为 ×100 整数，max 直接）。
-            默认值来自 <code>USER/main.c</code>：2.0 / 0.5 / 0 / 150。
+            默认值来自 <code>USER/main.c</code>：1.0 / 0 / 0 / 600；ff 默认 -55（表单只发 4 参数，固件保留 ff，可用命令台发第 5 个）。
           </p>
         </form>
 

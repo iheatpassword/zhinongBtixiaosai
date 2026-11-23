@@ -181,6 +181,7 @@ static u8  shift_show;
 static s16 shift_dir;          /* +1 = crab right, -1 = crab left */
 static u8  rev_state;
 static void abort_all(void);
+static void shift_start(s16 dir);
 static u8  wheel_test_mode;
 static u8  wheel_idx;
 static u32 wheel_t_on;
@@ -194,8 +195,8 @@ static u8  edge_mode;
 static float edge_yaw_i;
 static u16 edge_target_mm;   /* latched left-laser target for this run */
 static u8  edge_target_ok;
-static float diff_kp = 2.0f, diff_ki = 0.5f, diff_kd = 0.0f, diff_max = 150.0f;
-static float diff_ff = 0.0f;   /* constant left/right offset, counts      */
+static float diff_kp = 1.0f, diff_ki = 0.0f, diff_kd = 0.0f, diff_max = 600.0f;
+static float diff_ff = -55.0f;  /* constant left/right offset, counts      */
 static float diff_i;
 static u8  diff_cal_mode;
 static s8  diff_cal_dir;
@@ -844,6 +845,7 @@ static void cmd_help(USART_TypeDef *u)
   tx_puts(u, "K       : diff PID: K kp ki kd max [ff] (kp/ki/kd x100)\r\n");
   tx_puts(u, "T / T-  : servos +90 / -90 deg (broadcast)\r\n");
   tx_puts(u, "C       : servos centre\r\n");
+  tx_puts(u, "W / W-  : crab test right / left (front/rear diff)\r\n");
   tx_puts(u, "H / ?   : help\r\n");
   tx_puts(u, "===============================\r\n");
 }
@@ -961,6 +963,11 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
   {
     servo_broadcast_deg(0);
     tx_puts(u, "OK SERVO 0\r\n");
+  }
+  else if (c[0] == 'W')
+  {
+    shift_start((s16)((c[1] == '-') ? -1 : 1));
+    tx_puts(u, (c[1] == '-') ? "OK CRAB LEFT\r\n" : "OK CRAB RIGHT\r\n");
   }
   else if (c[0] == 'G')
   {
@@ -1248,6 +1255,7 @@ void reverse_start(void)
 
 static void shift_start(s16 dir)
 {
+  abort_all();
   shift_mode  = 1u;
   shift_dir   = dir;
   shift_show  = 0u;
@@ -1987,34 +1995,49 @@ int main(void)
           wheel_t_on = ms_now();
           wheel_peak[0] = wheel_peak[1] = wheel_peak[2] = wheel_peak[3] = 0;
         }
-        else if (fsm2_mode == 0u)
+        else if (fsm2_mode != 0u)
         {
-          if (safety_restart_ok() != 0u)
-          {
-            fsm2_begin();
-          }
-          else
-          {
-            tx_puts(UART5, "SAFE: MOVE AWAY\r\n");
-          }
+          tx_puts(UART5, "FSM2 RUNNING\r\n");
+        }
+        else if (edge_mode != 0u)
+        {
+          tx_puts(UART5, "EDGE RUNNING\r\n");
+        }
+        else if (safety_restart_ok() != 0u)
+        {
+          edge_begin();              /* single click: edge-follow test (S1) */
         }
         else
         {
-          tx_puts(UART5, "FSM2 RUNNING\r\n");
+          tx_puts(UART5, "SAFE: MOVE AWAY\r\n");
         }
       }
       else if (ev == 2u)
       {
-        edge_begin();
+        if (fsm2_mode != 0u)
+        {
+          tx_puts(UART5, "FSM2 RUNNING\r\n");
+        }
+        else if (safety_restart_ok() != 0u)
+        {
+          fsm2_begin();              /* double click: full FSM2 flow */
+        }
+        else
+        {
+          tx_puts(UART5, "SAFE: MOVE AWAY\r\n");
+        }
       }
       else if (ev == 3u)
       {
-        /* 3-click stop removed per request 2026-11-23; keep only a way out
-           of the single-wheel test (otherwise that mode would need a reset). */
         if (wheel_test_mode != 0u)
         {
-          abort_all();             /* also clears wheel_test_mode */
+          abort_all();               /* also clears wheel_test_mode */
           tx_puts(UART5, "WHEEL TEST EXIT\r\n");
+        }
+        else
+        {
+          shift_start(1);            /* triple click: crab right test */
+          tx_puts(UART5, "CRAB RIGHT START\r\n");
         }
       }
       else if (ev == 4u)
