@@ -40,6 +40,10 @@
 #define SPD_DEFAULT        150      /* counts per CTRL_MS                   */
 #define SPD_MAX            2000
 
+/* single-wheel wiring/order test (USER key long press) */
+#define WHEEL_TEST_MS      1500u    /* spin window per wheel, ms            */
+#define WHEEL_TEST_PWM     2500     /* fixed open-loop PWM in the test      */
+
 /* 70 cm straight test: 4*500 lines * 30 gear = 60000 counts / wheel rev */
 #define WHEEL_DIAMETER_MM  76.4f   /* calibrated: 69 mm nominal gave 77.5 cm per 70 cm */
 #define ENCODER_CPR        60000.0f
@@ -120,12 +124,20 @@
 #define SERVO_MOVE_MS      300u
 #define BROADCAST_ID       0xFEu
 
-/* wheels: FL=0 FR=1 RL=2 RR=3 ; servos: FL=4 FR=3 RL=2 RR=1 */
+/* wheels: FL=0 FR=1 RL=2 RR=3 ; servos: FL=4 FR=3 RL=2 RR=1
+   measured 2026-11-23 (single-wheel test):
+     FL=A(LF)  FR=B(RF)  RL=C(LB)  RR=D(RB)
+     encoder E1..E4 (TIM2..TIM5) peaks with the OLD AB polarity = - + + -
+   AB was then flipped (front wheels ran backwards), so A/B forward signs are
+   expected to invert; re-check with the fixed test.
+   The speed loop takes |count|, so the signs are informational. */
 static const u8 WHEEL_MOTOR[4] = { 0u, 1u, 2u, 3u };
 static const u8 WHEEL_SERVO_ID[4] = { 4u, 3u, 2u, 1u };
 
-/* +1 / -1 : PWM sign used as "drive forward" for that wheel (calibrated) */
-static s8 motor_dir[4] = { -1, -1, 1, 1 };
+/* +1 / -1 : PWM sign used as "drive forward" for that wheel (calibrated)
+   2026-11-23: the first working wheel test showed A/B (front) running
+   backwards, so both were flipped from -1 to +1. */
+static s8 motor_dir[4] = { 1, 1, 1, 1 };
 
 static s8  motor_run;        /* 0 stop, +1 forward, -1 backward */
 static s16 spd_target;       /* counts per control period */
@@ -171,6 +183,7 @@ static void abort_all(void);
 static u8  wheel_test_mode;
 static u8  wheel_idx;
 static u32 wheel_t_on;
+static s16 wheel_peak[4];      /* max |encoder count| seen in the window */
 static u8  diff_test_mode;
 static u8  diff_show;
 static s32 diff_test_counts;
@@ -463,17 +476,34 @@ static void speed_tick(void)
 
   if (wheel_test_mode != 0u)
   {
-    u8 ww;
+    u8  ww;
     int wr;
+    u8  on = (u8)(((ms_now() - wheel_t_on) < WHEEL_TEST_MS) ? 1u : 0u);
 
     for (ww = 0u; ww < 4u; ww++)
     {
-      wr = Read_Encoder((u8)(2u + ww));
-      if (wr < 0) wr = -wr;
-      if (wr > 32000) wr = 32000;
+      wr = Read_Encoder((u8)(2u + ww));   /* keep the sign: polarity check */
+      if (wr >  32000) wr =  32000;
+      if (wr < -32000) wr = -32000;
       meas_spd[ww] = (s16)wr;
-      pwm_out[ww] = (ww == wheel_idx) ? (s16)2500 : (s16)0;
+
+      /* peak-hold so the result is still readable after the wheel stops */
+      if (on != 0u)
+      {
+        int a = (wr < 0) ? -wr : wr;
+        int b = (wheel_peak[ww] < 0) ? -(int)wheel_peak[ww]
+                                     :  (int)wheel_peak[ww];
+        if (a > b) wheel_peak[ww] = (s16)wr;
+      }
+
+      pwm_out[ww] = ((on != 0u) && (ww == wheel_idx))
+                    ? (s16)WHEEL_TEST_PWM : (s16)0;
     }
+
+    /* speed_apply() is gated by motor_run; drive directly while in the window.
+       (This re-arms every 20 ms, so a low-battery stop cannot end the window;
+        run this test with the car lifted.) */
+    motor_run = (on != 0u) ? 1 : 0;
     speed_apply();
     return;
   }
@@ -649,15 +679,19 @@ static void screen(void)
 
   if (wheel_test_mode != 0u)
   {
+    u8 k;
+
     OLED_Clear();
-    OLED_ShowString(0, 0, (u8 *)"WHEEL ID TEST");
-    OLED_ShowString(0, 12, (u8 *)((wheel_idx == 0u) ? "FL" : (wheel_idx == 1u) ? "FR" : (wheel_idx == 2u) ? "RL" : "RR"));
-    OLED_ShowString(24, 12, (u8 *)"MOT=");
-    OLED_ShowNumber(56, 12, (u32)WHEEL_MOTOR[wheel_idx], 2, 12);
-    OLED_ShowString(0, 24, (u8 *)"SPD=");
-    show_signed(32, 24, (int32_t)meas_spd[wheel_idx], 5);
-    OLED_ShowString(0, 36, (u8 *)"CLICK=NEXT");
-    OLED_ShowString(0, 48, (u8 *)"TRIPLE=EXIT");
+    OLED_ShowString(0, 0, (u8 *)"MOTOR ");
+    OLED_ShowChar(48, 0, (u8)('A' + WHEEL_MOTOR[wheel_idx]), 12, 1);
+    OLED_ShowString(56, 0, (u8 *)"3CLK=EXIT");
+    for (k = 0u; k < 4u; k++)
+    {
+      u8 yy = (u8)(12u + 12u * k);
+      OLED_ShowString(0, yy, (u8 *)"E");
+      OLED_ShowChar(8, yy, (u8)('1' + k), 12, 1);
+      show_signed(24, yy, (int32_t)wheel_peak[k], 5);
+    }
     OLED_Refresh_Gram();
     return;
   }
@@ -1071,6 +1105,7 @@ static void abort_all(void)
   edge_mode = 0u;
   cal_mode = 0u;
   diff_cal_mode = 0u;
+  wheel_test_mode = 0u;        /* any abort also leaves the wheel test */
   Fsm2_Abort();
   app_override = 0u;
 }
@@ -1416,7 +1451,11 @@ int main(void)
       {
         float r = gyro_z_dps() * GYRO_SIGN;
         yaw_rate_dps = r;
-        if ((motor_run != 0) || (fsm_active() != 0u)) yaw_deg += r * 0.02f;
+        if (((motor_run != 0) || (fsm_active() != 0u)) &&
+            (wheel_test_mode == 0u))
+        {
+          yaw_deg += r * 0.02f;   /* the wheel test spins on the spot: no yaw */
+        }
 
         if (rev_state != 0u)
         {
@@ -1649,13 +1688,6 @@ int main(void)
           }
         }
 
-        if ((wheel_test_mode != 0u) && ((ms_now() - wheel_t_on) >= 1500u))
-        {
-          u8 ww;
-          for (ww = 0u; ww < 4u; ww++) pwm_out[ww] = 0;
-          speed_apply();
-        }
-
         if (diff_test_mode != 0u)
         {
           if ((s32)((u16)(App_GetDistanceCm() - diff_test_base)) >= 100)
@@ -1672,8 +1704,9 @@ int main(void)
         if (diff_cal_mode != 0u)
         {
           s16 dsp[4];
-          if (diff_cal_dir > 0) { dsp[0] = 700; dsp[1] = 700; dsp[2] = 900; dsp[3] = 900; }
-          else                  { dsp[0] = 900; dsp[1] = 900; dsp[2] = 700; dsp[3] = 700; }
+          /* 0=LF 1=RF 2=LB 3=RB: D+ = left slow / right fast */
+          if (diff_cal_dir > 0) { dsp[0] = 700; dsp[1] = 900; dsp[2] = 700; dsp[3] = 900; }
+          else                  { dsp[0] = 900; dsp[1] = 700; dsp[2] = 900; dsp[3] = 700; }
           App_SetWheelSpeed(dsp);
           diff_cal_counts = (s32)((u16)(App_GetDistanceCm() - diff_cal_base_cm));
           if (diff_cal_counts >= 100)
@@ -1747,10 +1780,11 @@ int main(void)
             if (corr >  diff_max) corr =  diff_max;
             if (corr < -diff_max) corr = -diff_max;
 
-            esp[0] = (s16)(EDGE_SPD + corr);
-            esp[1] = (s16)(EDGE_SPD + corr);
-            esp[2] = (s16)(EDGE_SPD - corr);
-            esp[3] = (s16)(EDGE_SPD - corr);
+            /* left/right differential: 0=LF 1=RF 2=LB 3=RB */
+            esp[0] = (s16)(EDGE_SPD + corr);   /* LF */
+            esp[1] = (s16)(EDGE_SPD - corr);   /* RF */
+            esp[2] = (s16)(EDGE_SPD + corr);   /* LB */
+            esp[3] = (s16)(EDGE_SPD - corr);   /* RB */
             App_SetWheelSpeed(esp);
           }
 
@@ -1839,10 +1873,11 @@ int main(void)
                     c2 = diff_kp * yaw_deg + diff_i + diff_kd * r2;
                     if (c2 >  diff_max) c2 =  diff_max;
                     if (c2 < -diff_max) c2 = -diff_max;
-                    esp[0] = (s16)(EDGE_SPD + c2);
-                    esp[1] = (s16)(EDGE_SPD + c2);
-                    esp[2] = (s16)(EDGE_SPD - c2);
-                    esp[3] = (s16)(EDGE_SPD - c2);
+                    /* left/right differential: 0=LF 1=RF 2=LB 3=RB */
+                    esp[0] = (s16)(EDGE_SPD + c2);   /* LF */
+                    esp[1] = (s16)(EDGE_SPD - c2);   /* RF */
+                    esp[2] = (s16)(EDGE_SPD + c2);   /* LB */
+                    esp[3] = (s16)(EDGE_SPD - c2);   /* RB */
                     App_SetWheelSpeed(esp);
                   }
                   else
@@ -1897,6 +1932,7 @@ int main(void)
         {
           wheel_idx = (u8)((wheel_idx + 1u) & 3u);
           wheel_t_on = ms_now();
+          wheel_peak[0] = wheel_peak[1] = wheel_peak[2] = wheel_peak[3] = 0;
         }
         else
         {
@@ -1909,15 +1945,17 @@ int main(void)
       }
       else if (ev == 3u)
       {
-        abort_all();
+        abort_all();               /* also clears wheel_test_mode */
         tx_puts(UART5, "ABORT\r\n");
       }
       else if (ev == 4u)
       {
         abort_all();
+        App_SetServoCenter();      /* wheels straight: "forward" is meaningful */
         wheel_test_mode = 1u;
         wheel_idx = 0u;
         wheel_t_on = ms_now();
+        wheel_peak[0] = wheel_peak[1] = wheel_peak[2] = wheel_peak[3] = 0;
         tx_puts(UART5, "WHEEL ID START\r\n");
         diff_test_mode = 0u;
       }

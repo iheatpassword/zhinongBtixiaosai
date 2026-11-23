@@ -24,7 +24,7 @@
 | 单击 | 启动 FSM2（正式流程） |
 | 双击 | 贴边测试 |
 | 三击 | 立即停车/中止 |
-| 长按 | 单轮标定（WHEEL ID TEST，单击切换 FL→FR→RL→RR） |
+| 长按 | 单轮标定（WHEEL ID TEST，单击切换 MotorA→D，OLED 显示 E1–E4 峰值） |
 
 ## 快速开始
 
@@ -49,12 +49,16 @@ $proj='C:\Users\iheat\Desktop\smart wheels2\C30D_MotorTest\USER\WHEELTEC.uvprojx
 
 ## 硬件接线
 
-| 物理轮 | 电机 | 编码器 | 舵机 ID |
-|---|---|---|---|
-| FL 左前 | MotorA | E1 / TIM2 | 4 |
-| FR 右前 | MotorB | E2 / TIM3 | 3 |
-| RL 左后 | MotorC | E3 / TIM4 | 2 |
-| RR 右后 | MotorD | E4 / TIM5 | 1 |
+| 物理轮 | 电机 | 编码器 | 前进时编码器符号 | 舵机 ID |
+|---|---|---|---|---|
+| FL 左前 | MotorA | E1 / TIM2 | − | 4 |
+| FR 右前 | MotorB | E2 / TIM3 | + | 3 |
+| RL 左后 | MotorC | E3 / TIM4 | + | 2 |
+| RR 右后 | MotorD | E4 / TIM5 | − | 1 |
+
+> 2026-11-23 单轮标定实测确认（`MOTOR A/B/C/D` + `E1..E4` 峰值）。表中编码器符号是
+> **AB 极性翻转前**的测量（翻转后 A/B 前进符号预计变为 `+ / −`，需复测）；
+> 速度环取绝对值，符号仅供带符号里程/航向扩展使用。
 
 - 舵机总线：USART2（PD5/PD6），115200，广播 ID `0xFE`，位置 `500 ± 角度×4.1667`；
 - 激光：F103 → UART4（PC10/PC11），v2 帧 `AA 55 | dL dR dF dB | flags | CRC8`；
