@@ -195,6 +195,7 @@ static u8  edge_mode;
 static float edge_yaw_i;
 static u16 edge_target_mm;   /* latched left-laser target for this run */
 static u8  edge_target_ok;
+static u16 edge_base_cm;     /* odometry baseline for the edge run     */
 static float diff_kp = 1.0f, diff_ki = 0.0f, diff_kd = 0.0f, diff_max = 600.0f;
 static float diff_ff = -55.0f;  /* constant left/right offset, counts      */
 static float diff_i;
@@ -1225,7 +1226,9 @@ static void edge_begin(void)
   s16 esp[4];
 
   abort_all();
+  Fsm2_Init();                /* clear the stale F2 fault/state for this test */
   edge_target_reset();
+  edge_base_cm = App_GetDistanceCm();
   edge_mode = 1u;
   edge_yaw_i = 0.0f;
   diff_i = 0.0f;
@@ -1256,6 +1259,7 @@ void reverse_start(void)
 static void shift_start(s16 dir)
 {
   abort_all();
+  Fsm2_Init();                /* clear the stale F2 fault/state for this test */
   shift_mode  = 1u;
   shift_dir   = dir;
   shift_show  = 0u;
@@ -1779,6 +1783,15 @@ int main(void)
           }
         }
 
+        if ((edge_mode != 0u) &&
+            ((Safety_MinDistanceStop(&g_sf, SAFE_STOP_MM) != 0u) ||
+             (g_stall.stalled != 0u)))
+        {
+          App_DriveStop();
+          edge_mode = 0u;
+          tx_puts(UART5, "EDGE SAFE STOP\r\n");
+        }
+
         if (edge_mode != 0u)
         {
           float e = 0.0f;
@@ -1840,8 +1853,9 @@ int main(void)
             App_SetWheelSpeed(esp);
           }
 
-          if (((g_laser.dF != 0xFFFFu) && (g_laser.dF <= 206u)) ||
-              ((g_laser.dF == 0xFFFFu) && (App_GetDistanceCm() > 400u)))
+          if (((g_laser.dF != 0xFFFFu) && (g_laser.dF <= ENTRY_STOP_MM)) ||
+              ((g_laser.dF == 0xFFFFu) &&
+               ((u16)(App_GetDistanceCm() - edge_base_cm) > 400u)))
           {
             edge_mode = 0u;
             motor_run = 0;
