@@ -24,7 +24,7 @@ const CHART_MAX_POINTS = 240;
 const LOG_DOM_LIMIT = 500;
 const LOG_KEEP_LIMIT = 3000;
 const ARM_MS = 3000;
-const DEFAULT_PARAMS = { kp: 1.0, ki: 0, kd: 0, kmax: 600, v: 150 };
+const DEFAULT_PARAMS = { kp: 2.0, ki: 0.5, kd: 0.3, kmax: 600, v: 150 };
 
 /*
  * 会让小车动作的命令首字母。A/E/F/B/G/D/P/T 是任务要求 + HANDOVER.md 第 11 节
@@ -1453,7 +1453,7 @@ function bindEvents() {
     } catch (_e) {
       /* 忽略 */
     }
-    toast('已恢复默认参数（1.0 / 0 / 0 / 600，ff 由固件保持 -55，V150）', 'ok');
+    toast('已恢复默认参数（2.0 / 0.5 / 0.3 / 600，ff 由固件保持 -20，V150）', 'ok');
   });
 
   // 串口热插拔

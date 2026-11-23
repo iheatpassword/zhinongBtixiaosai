@@ -197,11 +197,12 @@ static u16 edge_target_mm;   /* latched left-laser target for this run */
 static u8  edge_target_ok;
 static u16 edge_base_cm;     /* odometry baseline for the edge run     */
 static s16 edge_steer_dbg;   /* last edge/ENTRY steer command, 0.1 deg */
+static s16 edge_toe_dbg;     /* last edge front/rear toe, 0.1 deg        */
 static u16 laser_dl_hold_mm; /* last valid left-laser distance         */
 static u32 laser_dl_hold_ms;
 static u8  laser_dl_hold_ok;
-static float diff_kp = 1.0f, diff_ki = 0.0f, diff_kd = 0.0f, diff_max = 600.0f;
-static float diff_ff = -55.0f;  /* constant left/right offset, counts (pure-diff trim) */
+static float diff_kp = 2.0f, diff_ki = 0.5f, diff_kd = 0.3f, diff_max = 600.0f;
+static float diff_ff = -20.0f;  /* constant left/right offset, counts (pure-diff trim) */
 static float diff_i;
 static u8  diff_cal_mode;
 static s8  diff_cal_dir;
@@ -1860,6 +1861,8 @@ int main(void)
                                   EDGE_YAW_KD * (gyro_z_dps() * GYRO_SIGN));
             if (dy >  EDGE_YAW_MAX) dy =  EDGE_YAW_MAX;
             if (dy < -EDGE_YAW_MAX) dy = -EDGE_YAW_MAX;
+            if (EDGE_KP <= 0.0f) dy = 0.0f;   /* pure differential: no toe steering */
+            edge_toe_dbg = (s16)(dy * 10.0f);
 
             fr = d + dy;
             rr = d - dy;
@@ -1982,6 +1985,7 @@ int main(void)
                       if (d2 < -EDGE_MAX) d2 = -EDGE_MAX;
                     }
                     edge_steer_dbg = (s16)(d2 * 10.0f);
+                    edge_toe_dbg = 0;
                     App_SetSteer4(d2, d2, d2, d2);
                     r2 = gyro_z_dps() * GYRO_SIGN;
                     diff_i += diff_ki * yaw_deg * 0.02f;
@@ -2253,6 +2257,8 @@ int main(void)
         tx_num(u, (edge_target_ok != 0u) ? (int)edge_target_mm : 0);
         tx_puts(u, " ES=");
         tx_num(u, (int)edge_steer_dbg);
+        tx_puts(u, " TOE=");
+        tx_num(u, (int)edge_toe_dbg);
         tx_puts(u, " SVO=");
         tx_num(u, (int)servo_angle);
         tx_puts(u, " P=");
