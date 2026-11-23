@@ -1098,6 +1098,8 @@ static void abort_all(void)
   edge_mode = 0u;
   cal_mode = 0u;
   diff_cal_mode = 0u;
+  diff_test_mode = 0u;         /* an aborted DIFFTEST must not outlive the stop */
+  diff_show = 0u;
   wheel_test_mode = 0u;        /* any abort also leaves the wheel test */
   Fsm2_Abort();
   app_override = 0u;
