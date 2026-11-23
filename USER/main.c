@@ -1227,6 +1227,11 @@ static void edge_begin(void)
 
   abort_all();
   Fsm2_Init();                /* clear the stale F2 fault/state for this test */
+  if ((g_laser.dL == 0xFFFFu) || ((g_laser.flags & 0x02u) == 0u))
+  {
+    tx_puts(UART5, "EDGE: LEFT LASER INVALID\r\n");
+    return;                   /* no lateral reference: do not drive blind */
+  }
   edge_target_reset();
   edge_base_cm = App_GetDistanceCm();
   edge_mode = 1u;
