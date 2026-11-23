@@ -40,8 +40,13 @@ e  = dRidge - RIDGE_TARGET_MM
 四轮角度 = 90° + δ
 ```
 
-当前参数：`RIDGE_TARGET_MM=120`、`RIDGE_KP=0.05`、`RIDGE_OFFSET_MAX=6°`、`RIDGE_SIGN=+1`。
+当前参数（实车标定）：`RIDGE_TARGET_MM=148`、`RIDGE_FF_DEG=7.5`、`RIDGE_KP=0.02`、
+`RIDGE_KI=0.004`、`RIDGE_OFFSET_MAX=18°`、`RIDGE_SIGN=+1`。
 无效时 δ=0，自动退回纯航向保持。
+
+> **安装偏置**：四次多位置实测，真实间隙 = `dB` 读数 − **37 mm**
+> （例如真实 100 mm 时读约 137 mm）。`RIDGE_TARGET_MM` 用的是**传感器读数**，
+> 换算真实间隙时要减去该偏置。
 
 ## 4. 标定与验收
 

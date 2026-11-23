@@ -52,7 +52,7 @@
 #define EDGE_TARGET_MM     100.0f   /* left laser distance to keep        */
 #define EDGE_KP            0.10f    /* deg per mm error                   */
 #define EDGE_MAX           5.0f     /* clamp, deg                         */
-#define EDGE_SPD           900      /* forward speed while edge-following */
+#define EDGE_SPD           2600     /* forward speed while edge-following */
 #define EDGE_SIGN          (-1.0f)  /* dL<target -> steer right (positive) */
 #define EDGE_YAW_KP        0.0f     /* front/rear steer deg per deg yaw   */
 #define EDGE_YAW_KD        0.10f    /* per deg/s                          */
@@ -113,7 +113,7 @@
 #define INTEG_MAX          10000
 #define PWM_LIM            12000
 #define SERVO_FAST_MS      150u    /* centering steering update time */
-#define CMD_TIMEOUT_MS     5000u
+#define CMD_TIMEOUT_MS     600000u   /* effectively disabled; IWDG still protects */
 
 #define SERVO_CENTER       500
 #define SERVO_UNIT_PER_DEG 4.1667f
@@ -168,6 +168,14 @@ static u8  shift_show;
 static s16 shift_dir;          /* +1 = crab right, -1 = crab left */
 static u8  rev_state;
 static void abort_all(void);
+static u8  wheel_test_mode;
+static u8  wheel_idx;
+static u32 wheel_t_on;
+static u8  diff_test_mode;
+static u8  diff_show;
+static s32 diff_test_counts;
+static u16 diff_test_base;
+static s16 diff_test_pwm = 2500;
 static u8  edge_mode;
 static float edge_yaw_i;
 static float diff_kp = 2.0f, diff_ki = 0.5f, diff_kd = 0.0f, diff_max = 150.0f;
@@ -182,7 +190,6 @@ static s8  cal_dir;
 static s32 cal_counts;
 static u8  fsm2_mode;
 static u16 fsm2_dist0;
-static u32 last_long_ms;
 static SafetyFilt g_sf;
 static SafetyCrab g_sc;
 static SafetyStall g_stall;
@@ -454,6 +461,46 @@ static void speed_tick(void)
   float rate;
   int corr = 0;
 
+  if (wheel_test_mode != 0u)
+  {
+    u8 ww;
+    int wr;
+
+    for (ww = 0u; ww < 4u; ww++)
+    {
+      wr = Read_Encoder((u8)(2u + ww));
+      if (wr < 0) wr = -wr;
+      if (wr > 32000) wr = 32000;
+      meas_spd[ww] = (s16)wr;
+      pwm_out[ww] = (ww == wheel_idx) ? (s16)2500 : (s16)0;
+    }
+    speed_apply();
+    return;
+  }
+
+  if (diff_test_mode != 0u)
+  {
+    u8 dw;
+    int draw;
+
+    for (dw = 0u; dw < 4u; dw++)
+    {
+      draw = Read_Encoder((u8)(2u + dw));
+      if (draw < 0) draw = -draw;
+      if (draw > 32000) draw = 32000;
+      raw_sum += draw;
+    }
+    odom_counts += (raw_sum / 4);
+    diff_test_counts += (raw_sum / 4);
+
+    pwm_out[0] =  diff_test_pwm;   /* FL forward */
+    pwm_out[1] = -diff_test_pwm;   /* FR reverse */
+    pwm_out[2] =  diff_test_pwm;   /* RL forward */
+    pwm_out[3] = -diff_test_pwm;   /* RR reverse */
+    speed_apply();
+    return;
+  }
+
   if ((motor_run != 0) && (app_override == 0u))
   {
     rate = yaw_rate_dps;
@@ -599,6 +646,85 @@ static void screen(void)
 {
   u8 i, y;
   s32 d01 = run_dist_01mm();
+
+  if (wheel_test_mode != 0u)
+  {
+    OLED_Clear();
+    OLED_ShowString(0, 0, (u8 *)"WHEEL ID TEST");
+    OLED_ShowString(0, 12, (u8 *)((wheel_idx == 0u) ? "FL" : (wheel_idx == 1u) ? "FR" : (wheel_idx == 2u) ? "RL" : "RR"));
+    OLED_ShowString(24, 12, (u8 *)"MOT=");
+    OLED_ShowNumber(56, 12, (u32)WHEEL_MOTOR[wheel_idx], 2, 12);
+    OLED_ShowString(0, 24, (u8 *)"SPD=");
+    show_signed(32, 24, (int32_t)meas_spd[wheel_idx], 5);
+    OLED_ShowString(0, 36, (u8 *)"CLICK=NEXT");
+    OLED_ShowString(0, 48, (u8 *)"TRIPLE=EXIT");
+    OLED_Refresh_Gram();
+    return;
+  }
+
+  if ((diff_test_mode != 0u) || (diff_show != 0u))
+  {
+    u8 k2;
+    OLED_Clear();
+    OLED_ShowString(0, 0, (u8 *)(diff_test_mode ? "DIFF TEST" : "DIFF RESULT"));
+    OLED_ShowString(0, 10, (u8 *)"CMD L+ R-");
+    for (k2 = 0u; k2 < 4u; k2++)
+    {
+      u8 yy = (u8)(20u + 10u * k2);
+      OLED_ShowString(0, yy, (u8 *)((k2 == 0u) ? "FL" : (k2 == 1u) ? "FR" : (k2 == 2u) ? "RL" : "RR"));
+      show_signed(18, yy, (int32_t)meas_spd[k2], 4);
+    }
+    OLED_Refresh_Gram();
+    return;
+  }
+
+  if ((edge_mode != 0u) || ((fsm2_mode != 0u) && (Fsm2_GetState() == F2_ENTRY)))
+  {
+    OLED_Clear();
+    OLED_ShowString(0, 0, (u8 *)"EDGE / ENTRY");
+    OLED_ShowString(0, 10, (u8 *)"L=");
+    OLED_ShowNumber(24, 10, (u32)((g_sf.dL == 0xFFFFu) ? 0u : g_sf.dL), 4, 12);
+    OLED_ShowString(0, 20, (u8 *)"TGT=100");
+    OLED_ShowString(0, 30, (u8 *)"DB=");
+    OLED_ShowNumber(24, 30, (u32)((g_sf.dB == 0xFFFFu) ? 0u : g_sf.dB), 4, 12);
+    OLED_ShowString(0, 40, (u8 *)"YAW=");
+    show_signed(32, 40, (int32_t)(yaw_deg * 10.0f), 3);
+    OLED_ShowString(0, 50, (u8 *)"F2=");
+    OLED_ShowNumber(24, 50, (u32)Fsm2_GetState(), 2, 12);
+    OLED_Refresh_Gram();
+    return;
+  }
+
+  if ((fsm2_mode != 0u) && (Fsm2_GetState() >= F2_CRAB_R1) && (Fsm2_GetState() <= F2_EXIT_L))
+  {
+    Fsm2State st = Fsm2_GetState();
+    u16 v = 0;
+    const char *nm = "L";
+    u16 tgt = 100;
+
+    if ((st == F2_CRAB_R1) || (st == F2_CRAB_R3) || (st == F2_CRAB_R5))
+    {
+      v = g_sf.dR; nm = "R";
+    }
+    else
+    {
+      v = g_sf.dL; nm = "L";
+    }
+    OLED_Clear();
+    OLED_ShowString(0, 0, (u8 *)"CRAB");
+    OLED_ShowString(40, 0, (u8 *)nm);
+    OLED_ShowString(56, 0, (u8 *)"=");
+    OLED_ShowNumber(72, 0, (u32)((v == 0xFFFFu) ? 0u : v), 4, 12);
+    OLED_ShowString(0, 10, (u8 *)"TGT=100");
+    OLED_ShowString(0, 20, (u8 *)"DB=");
+    OLED_ShowNumber(24, 20, (u32)((g_sf.dB == 0xFFFFu) ? 0u : g_sf.dB), 4, 12);
+    OLED_ShowString(0, 30, (u8 *)"YAW=");
+    show_signed(32, 30, (int32_t)(yaw_deg * 10.0f), 3);
+    OLED_ShowString(0, 40, (u8 *)"F2=");
+    OLED_ShowNumber(24, 40, (u32)st, 2, 12);
+    OLED_Refresh_Gram();
+    return;
+  }
 
   if ((shift_mode != 0u) || (shift_show != 0u))
   {
@@ -949,24 +1075,13 @@ static void abort_all(void)
   app_override = 0u;
 }
 
-/* ---- non-blocking key driver (single / double / long) ------------------ */
-#define KF_DOWN    0x01u
-#define KF_UP      0x02u
-#define KF_HOLD    0x04u
-#define KF_SINGLE  0x08u
-#define KF_DOUBLE  0x10u
-#define KF_LONG    0x20u
-#define KF_REPEAT  0x40u
-
-#define KEY_T_DOUBLE  50u    /* 250 ms  */
-#define KEY_T_LONG    240u   /* 1200 ms */
-#define KEY_T_REPEAT  20u    /* 100 ms  */
-
-static u8  key_flags;
-static u8  key_cnt;
-static u8  key_s;            /* 0 idle,1 pressed,2 released,3 double,4 long */
-static u8  key_curr, key_prev;
-static u16 key_time;
+/* ---- key driver: 1/2/3 clicks + long press, non-blocking --------------- */
+static u8  key_event;        /* 0 none, 1 single, 2 double, 3 triple, 4 long */
+static u8  k_curr, k_prev;
+static u8  k_sample;
+static u8  k_clicks;
+static u8  k_long_done;
+static u32 k_down_ms, k_up_ms;
 
 static u8 key_raw(void)
 {
@@ -975,63 +1090,76 @@ static u8 key_raw(void)
 
 static void key_tick(void)
 {
-  if (key_time > 0u) key_time--;
+  u32 now = ms_now();
+  u8 raw;
 
-  key_cnt++;
-  if (key_cnt < 4u) return;          /* sample every 20 ms */
-  key_cnt = 0u;
+  k_sample++;
+  if (k_sample < 4u) return;      /* sample every 20 ms */
+  k_sample = 0u;
 
-  key_prev = key_curr;
-  key_curr = key_raw();
+  raw = key_raw();
+  k_prev = k_curr;
+  k_curr = raw;
 
-  if (key_curr != 0u) key_flags |= KF_HOLD;
-  else                key_flags &= (u8)~KF_HOLD;
-
-  if ((key_curr != 0u) && (key_prev == 0u)) { key_flags |= KF_DOWN; tx_puts(UART5, "KD\r\n"); }
-  if ((key_curr == 0u) && (key_prev != 0u)) { key_flags |= KF_UP;   tx_puts(UART5, "KU\r\n"); }
-
-  if (key_s == 0u)
+  if ((k_curr != 0u) && (k_prev == 0u))
   {
-    if (key_curr != 0u) { key_time = KEY_T_LONG; key_s = 1u; }
+    k_down_ms = now;
+    k_long_done = 0u;
+    if (k_clicks < 3u) k_clicks++;
   }
-  else if (key_s == 1u)
+
+  if ((k_curr != 0u) && (k_long_done == 0u) && ((now - k_down_ms) >= 1200u))
   {
-    if (key_curr == 0u) { key_time = KEY_T_DOUBLE; key_s = 2u; }
-    else if (key_time == 0u)
-    {
-      key_time = KEY_T_REPEAT;
-      key_flags |= KF_LONG;
-      tx_puts(UART5, "KL\r\n");
-      key_s = 4u;
-    }
+    k_long_done = 1u;
+    k_clicks = 0u;
+    key_event = 4u;
+    tx_puts(UART5, "KL\r\n");
   }
-  else if (key_s == 2u)
+
+  if ((k_curr == 0u) && (k_prev != 0u))
   {
-    if (key_curr != 0u) { key_flags |= KF_DOUBLE; tx_puts(UART5, "KD2\r\n"); key_s = 3u; }
-    else if (key_time == 0u) { key_flags |= KF_SINGLE; tx_puts(UART5, "KS\r\n"); key_s = 0u; }
+    k_up_ms = now;
   }
-  else if (key_s == 3u)
+
+  if ((k_curr == 0u) && (k_long_done == 0u) && (k_clicks > 0u) &&
+      ((now - k_up_ms) >= 300u))
   {
-    if (key_curr == 0u) key_s = 0u;
-  }
-  else if (key_s == 4u)
-  {
-    if (key_curr == 0u) key_s = 0u;
-    else if (key_time == 0u) { key_time = KEY_T_REPEAT; key_flags |= KF_REPEAT; }
+    key_event = k_clicks;
+    if (k_clicks == 1u) tx_puts(UART5, "K1\r\n");
+    if (k_clicks == 2u) tx_puts(UART5, "K2\r\n");
+    if (k_clicks == 3u) tx_puts(UART5, "K3\r\n");
+    k_clicks = 0u;
   }
 }
 
-static u8 key_check(u8 f)
+/* start FSM2 (competition flow) */
+static void fsm2_begin(void)
 {
-  if ((key_flags & f) != 0u)
-  {
-    if (f != KF_HOLD) key_flags &= (u8)~f;
-    return 1u;
-  }
-  return 0u;
+  abort_all();
+  Fsm2_Start();
+  fsm2_mode = 1u;
+  fsm2_dist0 = App_GetDistanceCm();
+  diff_i = 0.0f;
+  tx_puts(UART5, "FSM2 START\r\n");
 }
 
-static void reverse_start(void)
+/* start edge-follow test */
+static void edge_begin(void)
+{
+  s16 esp[4];
+
+  abort_all();
+  edge_mode = 1u;
+  edge_yaw_i = 0.0f;
+  diff_i = 0.0f;
+  App_SetServoCenter();
+  esp[0] = EDGE_SPD; esp[1] = EDGE_SPD; esp[2] = EDGE_SPD; esp[3] = EDGE_SPD;
+  App_SetWheelSpeed(esp);
+  speed_reset();
+  tx_puts(UART5, "EDGE START\r\n");
+}
+
+void reverse_start(void)
 {
   rev_counts = 0;
   rev_start_ms = ms_now();
@@ -1521,6 +1649,26 @@ int main(void)
           }
         }
 
+        if ((wheel_test_mode != 0u) && ((ms_now() - wheel_t_on) >= 1500u))
+        {
+          u8 ww;
+          for (ww = 0u; ww < 4u; ww++) pwm_out[ww] = 0;
+          speed_apply();
+        }
+
+        if (diff_test_mode != 0u)
+        {
+          if ((s32)((u16)(App_GetDistanceCm() - diff_test_base)) >= 100)
+          {
+            diff_test_mode = 0u;
+            diff_show = 1u;
+            motor_run = 0;
+            speed_reset();
+            App_SetServoCenter();
+            tx_puts(UART5, "DIFFTEST DONE\r\n");
+          }
+        }
+
         if (diff_cal_mode != 0u)
         {
           s16 dsp[4];
@@ -1738,41 +1886,53 @@ int main(void)
 
     key_tick();
 
-    if (fsm2_mode == 0u)
+    if (key_event != 0u)
     {
-      if (key_check(KF_DOUBLE) != 0u)
+      u8 ev = key_event;
+      key_event = 0u;
+
+      if (ev == 1u)
       {
-        abort_all();                 /* double click: reverse 70 cm */
-        reverse_start();
-      }
-      else if (key_check(KF_SINGLE) != 0u)
-      {
-        if ((fsm_active() == 0u) && (run_state == 0u) && (cent_mode == 0u) &&
-            (shift_mode == 0u) && (rev_state == 0u))
+        if (wheel_test_mode != 0u)
         {
-          run_start();               /* single click: forward */
-        }
-      }
-      else if (key_check(KF_LONG) != 0u)
-      {
-        if ((last_long_ms != 0u) && ((ms_now() - last_long_ms) < 900u))
-        {
-          abort_all();               /* two long presses: start FSM2 */
-          Fsm2_Start();
-          fsm2_mode = 1u;
-          fsm2_dist0 = App_GetDistanceCm();
-          last_long_ms = 0u;
-          tx_puts(UART5, "FSM2 START\r\n");
+          wheel_idx = (u8)((wheel_idx + 1u) & 3u);
+          wheel_t_on = ms_now();
         }
         else
         {
-          if ((fsm_active() == 0u) && (run_state == 0u) && (cent_mode == 0u) &&
-              (shift_mode == 0u) && (rev_state == 0u))
-          {
-            shift_start(+1);         /* one long press: crab right */
-          }
-          last_long_ms = ms_now();
+          fsm2_begin();
         }
+      }
+      else if (ev == 2u)
+      {
+        edge_begin();
+      }
+      else if (ev == 3u)
+      {
+        abort_all();
+        tx_puts(UART5, "ABORT\r\n");
+      }
+      else if (ev == 4u)
+      {
+        abort_all();
+        wheel_test_mode = 1u;
+        wheel_idx = 0u;
+        wheel_t_on = ms_now();
+        tx_puts(UART5, "WHEEL ID START\r\n");
+        diff_test_mode = 0u;
+      }
+      else if (ev == 5u)
+      {
+        abort_all();
+        diff_test_mode = 1u;
+        diff_show = 0u;
+        diff_test_counts = 0;
+        diff_test_base = App_GetDistanceCm();
+        motor_run = 1;
+        app_override = 1u;
+        App_SetServoCenter();
+        speed_reset();
+        tx_puts(UART5, "DIFFTEST START\r\n");
       }
     }
 
@@ -1793,7 +1953,9 @@ int main(void)
       tx_puts(UART5, "LOW BATT STOP\r\n");
     }
 
-    if ((cent_mode == 0u) && (shift_mode == 0u) && (rev_state == 0u) && (run_state != 1u) &&
+    if ((cent_mode == 0u) && (shift_mode == 0u) && (rev_state == 0u) &&
+        (fsm2_mode == 0u) && (edge_mode == 0u) && (cal_mode == 0u) &&
+        (diff_cal_mode == 0u) && (run_state != 1u) &&
         (fsm_active() == 0u) && (motor_run != 0) &&
         ((ms_now() - last_cmd_ms) > CMD_TIMEOUT_MS))
     {
@@ -1835,6 +1997,10 @@ int main(void)
           tx_putc(u, ' ');
         }
         batt_volt = (float)Get_Adc(9) * 3.3f * 11.0f * 0.99f / 4096.0f;
+        tx_puts(u, " F2=");
+        tx_num(u, (int)Fsm2_GetState());
+        tx_puts(u, " FA=");
+        tx_num(u, (int)Fsm2_GetFaultCode());
         tx_puts(u, " K=");
         tx_num(u, (int)key_raw());
         tx_puts(u, " VB=");
