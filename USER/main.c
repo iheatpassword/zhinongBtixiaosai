@@ -54,7 +54,7 @@
 #define EDGE_MAX           5.0f     /* clamp, deg                         */
 #define EDGE_SPD           900      /* forward speed while edge-following */
 #define EDGE_SIGN          (-1.0f)  /* dL<target -> steer right (positive) */
-#define EDGE_YAW_KP        3.0f     /* front/rear steer deg per deg yaw   */
+#define EDGE_YAW_KP        0.0f     /* front/rear steer deg per deg yaw   */
 #define EDGE_YAW_KD        0.10f    /* per deg/s                          */
 #define EDGE_YAW_MAX       10.0f     /* clamp, deg                         */
 #define EDGE_YAW_SIGN      (1.0f)   /* + = right(clockwise); yaw<0 -> left */   /* back to +1 per bench observation         */
@@ -170,6 +170,13 @@ static u8  rev_state;
 static void abort_all(void);
 static u8  edge_mode;
 static float edge_yaw_i;
+static float diff_kp = 2.0f, diff_ki = 0.5f, diff_kd = 0.0f, diff_max = 150.0f;
+static float diff_i;
+static u8  diff_cal_mode;
+static s8  diff_cal_dir;
+static s32 diff_cal_counts;
+static u16 cal_base_cm;
+static u16 diff_cal_base_cm;
 static u8  cal_mode;
 static s8  cal_dir;
 static s32 cal_counts;
@@ -668,6 +675,15 @@ static void cmd_help(USART_TypeDef *u)
   tx_puts(u, "===============================\r\n");
 }
 
+static int parse_next(const char **s)
+{
+  int v = 0, sign = 1;
+  while (**s == ' ') (*s)++;
+  if (**s == '-') { sign = -1; (*s)++; }
+  while ((**s >= '0') && (**s <= '9')) { v = v * 10 + (**s - '0'); (*s)++; }
+  return sign * v;
+}
+
 static int parse_num(const char *s)
 {
   int v = 0;
@@ -813,6 +829,7 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
     cal_mode = 1u;
     cal_dir = (s8)((c[0] == 'P') ? 1 : -1);
     cal_counts = 0;
+    cal_base_cm = App_GetDistanceCm();
     yaw_deg = 0.0f;
     App_SetServoCenter();
     app_override = 0u;
@@ -823,11 +840,38 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
     App_SetSteer4(8.0f * cal_dir, 8.0f * cal_dir, -8.0f * cal_dir, -8.0f * cal_dir);
     tx_puts(u, "OK CAL START\r\n");
   }
+  else if (c[0] == 'K')
+  {
+    const char *q = &c[1];
+    diff_kp  = (float)parse_next(&q) / 100.0f;
+    diff_ki  = (float)parse_next(&q) / 100.0f;
+    diff_kd  = (float)parse_next(&q) / 100.0f;
+    diff_max = (float)parse_next(&q);
+    tx_puts(u, "OK K\r\n");
+  }
+  else if (c[0] == 'D')
+  {
+    abort_all();
+    diff_cal_mode = 1u;
+    diff_cal_dir = (s8)((c[1] == '-') ? -1 : 1);
+    diff_cal_counts = 0;
+    diff_cal_base_cm = App_GetDistanceCm();
+    yaw_deg = 0.0f;
+    App_SetServoCenter();
+    {
+      s16 dsp[4];
+      dsp[0] = 800; dsp[1] = 800; dsp[2] = 800; dsp[3] = 800;
+      App_SetWheelSpeed(dsp);
+    }
+    speed_reset();
+    tx_puts(u, "OK DIFF CAL\r\n");
+  }
   else if (c[0] == 'E')
   {
     abort_all();
     edge_mode = 1u;
     edge_yaw_i = 0.0f;
+    diff_i = 0.0f;
     App_SetServoCenter();
     {
       s16 esp[4];
@@ -900,6 +944,7 @@ static void abort_all(void)
   fsm2_mode = 0u;
   edge_mode = 0u;
   cal_mode = 0u;
+  diff_cal_mode = 0u;
   Fsm2_Abort();
   app_override = 0u;
 }
@@ -1476,10 +1521,29 @@ int main(void)
           }
         }
 
+        if (diff_cal_mode != 0u)
+        {
+          s16 dsp[4];
+          if (diff_cal_dir > 0) { dsp[0] = 700; dsp[1] = 700; dsp[2] = 900; dsp[3] = 900; }
+          else                  { dsp[0] = 900; dsp[1] = 900; dsp[2] = 700; dsp[3] = 700; }
+          App_SetWheelSpeed(dsp);
+          diff_cal_counts = (s32)((u16)(App_GetDistanceCm() - diff_cal_base_cm));
+          if (diff_cal_counts >= 100)
+          {
+            diff_cal_mode = 0u;
+            motor_run = 0;
+            speed_reset();
+            App_SetServoCenter();
+            tx_puts(UART5, "DIFFCAL DONE yaw=");
+            tx_num(UART5, (int)(yaw_deg * 10.0f));
+            tx_puts(UART5, "\r\n");
+          }
+        }
+
         if (cal_mode != 0u)
         {
           App_SetSteer4(8.0f * cal_dir, 8.0f * cal_dir, -8.0f * cal_dir, -8.0f * cal_dir);
-          cal_counts = App_GetDistanceCm();
+          cal_counts = (s32)((u16)(App_GetDistanceCm() - cal_base_cm));
           if (cal_counts >= 100)
           {
             cal_mode = 0u;
@@ -1524,7 +1588,21 @@ int main(void)
 
           {
             s16 esp[4];
-            esp[0] = EDGE_SPD; esp[1] = EDGE_SPD; esp[2] = EDGE_SPD; esp[3] = EDGE_SPD;
+            float rate2 = gyro_z_dps() * GYRO_SIGN;
+            float corr;
+
+            diff_i += diff_ki * yaw_deg * 0.02f;
+            if (diff_i >  diff_max) diff_i =  diff_max;
+            if (diff_i < -diff_max) diff_i = -diff_max;
+
+            corr = diff_kp * yaw_deg + diff_i + diff_kd * rate2;
+            if (corr >  diff_max) corr =  diff_max;
+            if (corr < -diff_max) corr = -diff_max;
+
+            esp[0] = (s16)(EDGE_SPD + corr);
+            esp[1] = (s16)(EDGE_SPD + corr);
+            esp[2] = (s16)(EDGE_SPD - corr);
+            esp[3] = (s16)(EDGE_SPD - corr);
             App_SetWheelSpeed(esp);
           }
 
@@ -1593,7 +1671,38 @@ int main(void)
               spd2[2] = RUN_SPD; spd2[3] = RUN_SPD;
               switch (g_f2out.action)
               {
-                case F2A_FWD:    App_SetSteerAll(0.0f);   App_SetWheelSpeed(spd2); break;
+                case F2A_FWD:
+                  if (Fsm2_GetState() == F2_ENTRY)
+                  {
+                    s16 esp[4];
+                    float e2 = 0.0f, d2 = 0.0f, c2, r2;
+                    if ((g_sf.dL != 0xFFFFu) && (g_sf.dL < 1000u))
+                    {
+                      e2 = (float)g_sf.dL - EDGE_TARGET_MM;
+                      d2 = EDGE_SIGN * EDGE_KP * e2;
+                      if (d2 >  EDGE_MAX) d2 =  EDGE_MAX;
+                      if (d2 < -EDGE_MAX) d2 = -EDGE_MAX;
+                    }
+                    App_SetSteer4(d2, d2, d2, d2);
+                    r2 = gyro_z_dps() * GYRO_SIGN;
+                    diff_i += diff_ki * yaw_deg * 0.02f;
+                    if (diff_i >  diff_max) diff_i =  diff_max;
+                    if (diff_i < -diff_max) diff_i = -diff_max;
+                    c2 = diff_kp * yaw_deg + diff_i + diff_kd * r2;
+                    if (c2 >  diff_max) c2 =  diff_max;
+                    if (c2 < -diff_max) c2 = -diff_max;
+                    esp[0] = (s16)(EDGE_SPD + c2);
+                    esp[1] = (s16)(EDGE_SPD + c2);
+                    esp[2] = (s16)(EDGE_SPD - c2);
+                    esp[3] = (s16)(EDGE_SPD - c2);
+                    App_SetWheelSpeed(esp);
+                  }
+                  else
+                  {
+                    App_SetSteerAll(0.0f);
+                    App_SetWheelSpeed(spd2);
+                  }
+                  break;
                 case F2A_CRAB_R: App_SetSteerAll(90.0f);  App_SetWheelSpeed(spd2); break;
                 case F2A_CRAB_L: App_SetSteerAll(-90.0f); App_SetWheelSpeed(spd2); break;
                 case F2A_REV:    App_SetSteerAll(0.0f);
