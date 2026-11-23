@@ -60,7 +60,7 @@
 #define EDGE_KP            0.10f    /* deg per mm error                   */
 #define EDGE_MAX           5.0f     /* clamp, deg                         */
 #define EDGE_SPD           2600     /* forward speed while edge-following */
-#define EDGE_SIGN          (1.0f)   /* sign fixed 2026-11-23: positive servo steers left in this car, so dL<target must command negative (right) */
+#define EDGE_SIGN          (-1.0f)  /* positive servo = right; verified by the FF=0 run: negative command moves the car left */
 #define EDGE_YAW_KP        0.0f     /* front/rear steer deg per deg yaw   */
 #define EDGE_YAW_KD        0.10f    /* per deg/s                          */
 #define EDGE_YAW_MAX       10.0f     /* clamp, deg                         */
@@ -201,7 +201,7 @@ static u16 laser_dl_hold_mm; /* last valid left-laser distance         */
 static u32 laser_dl_hold_ms;
 static u8  laser_dl_hold_ok;
 static float diff_kp = 1.0f, diff_ki = 0.0f, diff_kd = 0.0f, diff_max = 600.0f;
-static float diff_ff = -55.0f;  /* constant left/right offset, counts      */
+static float diff_ff = 0.0f;   /* constant left/right offset, counts      */
 static float diff_i;
 static u8  diff_cal_mode;
 static s8  diff_cal_dir;
