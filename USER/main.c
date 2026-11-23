@@ -57,9 +57,9 @@
 #define RUN_LAT_SIGN       (1.0f)   /* old forward-lateral assist sign    */
 #define EDGE_TARGET_MIN_MM 40u      /* never latch a target closer than this */
 #define EDGE_TARGET_LATCH_MAX_MM 120u /* latch the first dL below this      */
-#define EDGE_KP            0.10f    /* deg per mm error                   */
+#define EDGE_KP            0.0f     /* 0 = pure differential (no steering); restore 0.10 for 4WS edge */
 #define EDGE_MAX           5.0f     /* clamp, deg                         */
-#define EDGE_SPD           2600     /* forward speed while edge-following */
+#define EDGE_SPD           1200     /* forward speed while edge/ENTRY runs */
 #define EDGE_SIGN          (-1.0f)  /* positive servo = right; verified by the FF=0 run: negative command moves the car left */
 #define EDGE_YAW_KP        0.0f     /* front/rear steer deg per deg yaw   */
 #define EDGE_YAW_KD        0.10f    /* per deg/s                          */
@@ -201,7 +201,7 @@ static u16 laser_dl_hold_mm; /* last valid left-laser distance         */
 static u32 laser_dl_hold_ms;
 static u8  laser_dl_hold_ok;
 static float diff_kp = 1.0f, diff_ki = 0.0f, diff_kd = 0.0f, diff_max = 600.0f;
-static float diff_ff = 0.0f;   /* constant left/right offset, counts      */
+static float diff_ff = -55.0f;  /* constant left/right offset, counts (pure-diff trim) */
 static float diff_i;
 static u8  diff_cal_mode;
 static s8  diff_cal_dir;
@@ -1253,10 +1253,11 @@ static void edge_begin(void)
 
   abort_all();
   Fsm2_Init();                /* clear the stale F2 fault/state for this test */
-  if ((g_laser.dL == 0xFFFFu) || ((g_laser.flags & 0x02u) == 0u))
+  if ((EDGE_KP > 0.0f) &&
+      ((g_laser.dL == 0xFFFFu) || ((g_laser.flags & 0x02u) == 0u)))
   {
     tx_puts(UART5, "EDGE: LEFT LASER INVALID\r\n");
-    return;                   /* no lateral reference: do not drive blind */
+    return;                   /* 4WS edge needs dL; pure differential does not */
   }
   edge_target_reset();
   edge_base_cm = App_GetDistanceCm();
