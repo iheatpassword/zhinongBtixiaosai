@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>C30D 串口调参台</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="wrap">
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">C30D</span>
+        <div>
+          <h1>串口调参台</h1>
+          <p class="sub">四轮四舵小车 · 1 Hz 日志监视 / 在线参数 · 离线纯前端</p>
+        </div>
+      </div>
+      <div class="conn">
+        <span id="statusDot" class="dot" title="串口状态"></span>
+        <span id="statusText" class="status-text">未连接</span>
+        <button id="btnConnect" class="btn primary" type="button">连接串口</button>
+        <button id="btnDisconnect" class="btn" type="button" disabled>断开</button>
+        <button id="btnDemo" class="btn" type="button">演示模式</button>
+      </div>
+    </header>
+
+    <div id="supportBanner" class="banner warn" hidden>
+      <strong>当前浏览器不支持 Web Serial API。</strong>
+      请使用桌面版 <b>Chrome / Edge（89+）</b>，并通过
+      <code>http://localhost:8765</code>（或 https）打开本页；Web Serial 只在安全上下文可用。
+      没有串口时也可以先看演示模式。
+    </div>
+    <div id="bootError" class="banner error" hidden>
+      <strong>页面脚本没有加载成功。</strong>
+      不要直接双击 <code>index.html</code>（file:// 下 ES module 会被浏览器拦截）。
+      请在 <code>serial_tuner</code> 目录运行
+      <code>powershell -ExecutionPolicy Bypass -File .\serve.ps1</code>，
+      然后打开 <code>http://localhost:8765</code>。
+    </div>
+
+    <section class="status-strip" aria-label="会话状态">
+      <div class="stat"><span>数据源</span><b id="statSource">未连接</b></div>
+      <div class="stat"><span>日志行</span><b id="statLines">0</b></div>
+      <div class="stat"><span>解析错误</span><b id="statErrors">0</b></div>
+      <div class="stat"><span>最后更新</span><b id="statLast">—</b></div>
+      <div class="stat"><span>链路</span><b id="connInfo">115200 8N1 · 无流控</b></div>
+    </section>
+
+    <!-- ================= 实时卡片 ================= -->
+    <section class="cards" aria-label="实时数据卡片">
+      <article class="card" id="yawCard">
+        <div class="card-head"><span class="card-title">YAW 航向</span><span class="trend" id="yawTrend">—</span></div>
+        <div class="big"><b id="yawValue">--</b><span class="unit">°</span></div>
+        <div class="mini" id="yawSub">SY=--° · C=--</div>
+      </article>
+
+      <article class="card" id="f2Card">
+        <div class="card-head"><span class="card-title">F2 状态机</span><span class="code" id="f2Code">F2 = --</span></div>
+        <div class="state-name" id="f2Value">--</div>
+        <div class="mini" id="f2Label"></div>
+      </article>
+
+      <article class="card" id="faCard">
+        <div class="card-head"><span class="card-title">FA 故障</span><span class="code" id="faCode">FA = --</span></div>
+        <div class="state-name" id="faValue">--</div>
+        <div class="mini">FA≠0 时检查激光/堵转/超时</div>
+      </article>
+
+      <article class="card" id="battCard">
+        <div class="card-head"><span class="card-title">电池电压</span></div>
+        <div class="big"><b id="battValue">--</b><span class="unit">V</span></div>
+        <div class="mini" id="battSub">VB = --</div>
+      </article>
+
+      <article class="card" id="modeCard">
+        <div class="card-head"><span class="card-title">运行模式</span><span class="mini">CMD</span></div>
+        <div class="state-name" id="modeValue">--</div>
+        <div class="mini cmd-line" id="modeCmd">CMD = —</div>
+        <div class="mini" id="modeSub">MR=-- · CM=-- · P=--</div>
+      </article>
+
+      <article class="card" id="tgtCard">
+        <div class="card-head"><span class="card-title">目标速度</span><span class="code">tgt</span></div>
+        <div class="big"><b id="tgtValue">--</b><span class="unit">cnt/20ms</span></div>
+        <div class="mini" id="tgtSub">T0=-- · counts/20ms</div>
+      </article>
+
+      <article class="card laser" id="laserCard">
+        <div class="card-head"><span class="card-title">激光 / 链路</span><span id="lzChip" class="chip">--</span></div>
+        <div class="laser-grid">
+          <div><span>dL 左</span><b id="lsDl">--</b><em>mm</em></div>
+          <div><span>dR 右</span><b id="lsDr">--</b><em>mm</em></div>
+          <div><span>dF 前</span><b id="lsDf">--</b><em>mm</em></div>
+          <div title="来自 RG 首字段（垄侧/后向 TOF）"><span>dB 后/垄</span><b id="lsDb">--</b><em>mm</em></div>
+        </div>
+        <div class="chips-row">
+          <span class="mini">有效位</span>
+          <span id="validF" class="chip small off">F</span>
+          <span id="validL" class="chip small off">L</span>
+          <span id="validR" class="chip small off">R</span>
+        </div>
+        <div class="mini" id="lsFlags">LS flags = --</div>
+        <div class="mini" id="rgInfo">RG = --</div>
+      </article>
+    </section>
+
+    <!-- 四轮速度 / PWM -->
+    <section class="wheel-grid" id="wheelGrid" aria-label="四轮速度与 PWM">
+      <!-- 由 app.js 生成，顺序 FL / FR / RL / RR -->
+    </section>
+
+    <!-- ================= 趋势图 ================= -->
+    <section class="panel charts" aria-label="趋势图">
+      <div class="panel-head">
+        <h2>趋势图</h2>
+        <div class="btn-row">
+          <button id="chartPause" class="btn small" type="button" aria-pressed="false">暂停曲线</button>
+          <button id="chartClear" class="btn small" type="button">清空曲线</button>
+          <span class="hint">最近 240 点（1 Hz ≈ 4 分钟）</span>
+        </div>
+      </div>
+
+      <div class="chart-block">
+        <div class="chart-head">
+          <h3>YAW 航向角（°）</h3>
+          <div class="legend"><span class="lg" style="--c:#4cc9f0">YAW</span></div>
+        </div>
+        <canvas id="chartYaw" height="160"></canvas>
+      </div>
+
+      <div class="chart-block">
+        <div class="chart-head">
+          <h3>四轮速度（counts / 20 ms）</h3>
+          <div class="legend">
+            <span class="lg" style="--c:#4cc9f0">FL</span>
+            <span class="lg" style="--c:#f5b942">FR</span>
+            <span class="lg" style="--c:#35d07f">RL</span>
+            <span class="lg" style="--c:#b085ff">RR</span>
+          </div>
+        </div>
+        <canvas id="chartSpeed" height="160"></canvas>
+      </div>
+
+      <div class="chart-block">
+        <div class="chart-head">
+          <h3>激光距离（mm）</h3>
+          <div class="legend">
+            <span class="lg" style="--c:#4cc9f0">dL 左</span>
+            <span class="lg" style="--c:#f5b942">dR 右</span>
+            <span class="lg" style="--c:#35d07f">dF 前</span>
+          </div>
+        </div>
+        <canvas id="chartLaser" height="160"></canvas>
+      </div>
+    </section>
+
+    <!-- ================= 参数 + 命令 ================= -->
+    <div class="split">
+      <section class="panel params" aria-label="参数表单">
+        <div class="panel-head">
+          <h2>差速 PID 参数</h2>
+          <span class="hint">Kp/Ki/Kd 按 ×100 整数发送</span>
+        </div>
+        <form id="kForm" class="param-form" autocomplete="off">
+          <div class="form-grid">
+            <label>Kp <input id="kpInput" type="number" step="0.01" min="0" value="2.0"><em>×100</em></label>
+            <label>Ki <input id="kiInput" type="number" step="0.01" min="0" value="0.5"><em>×100</em></label>
+            <label>Kd <input id="kdInput" type="number" step="0.01" min="0" value="0"><em>×100</em></label>
+            <label>max <input id="kmaxInput" type="number" step="1" min="0" value="150"><em>直接</em></label>
+          </div>
+          <div class="form-actions">
+            <button class="btn primary" id="btnSendK" type="submit">发送 K 参数</button>
+            <code id="kPreview">K 200 50 0 150</code>
+          </div>
+          <p class="note">
+            固件格式 <code>K kp ki kd max</code>（kp/ki/kd 为 ×100 整数，max 直接）。
+            默认值来自 <code>USER/main.c</code>：2.0 / 0.5 / 0 / 150。
+          </p>
+        </form>
+
+        <form id="vForm" class="param-form" autocomplete="off">
+          <div class="form-grid">
+            <label>目标速度 V <input id="vInput" type="number" step="1" min="0" max="2000" value="150"><em>cnt/20ms</em></label>
+          </div>
+          <div class="form-actions">
+            <button class="btn primary" id="btnSendV" type="submit">发送 V</button>
+            <code id="vPreview">V150</code>
+          </div>
+          <p class="note">固件 <code>SPD_MAX=2000</code>（<code>V</code> 帮助文本里的 600 是旧值，以代码为准）。</p>
+        </form>
+
+        <div class="param-foot">
+          <span class="mini">最近发送：<b id="lastSent">—</b></span>
+          <button id="btnSaveParams" class="btn small" type="button">保存到本机</button>
+          <button id="btnResetParams" class="btn small" type="button">恢复默认</button>
+        </div>
+      </section>
+
+      <section class="panel command" aria-label="命令控制台">
+        <div class="panel-head">
+          <h2>命令控制台</h2>
+          <span class="hint">发送自动追加 <code>\r\n</code></span>
+        </div>
+        <div class="cmd-row">
+          <input id="cmdInput" type="text" placeholder="输入命令，例如 S / V150 / K 200 50 0 150"
+                 autocomplete="off" spellcheck="false">
+          <button id="btnSend" class="btn primary" type="button">发送</button>
+        </div>
+        <div class="quick-row">
+          <button class="btn quick" type="button" data-cmd="S">S 停止</button>
+          <button class="btn quick" type="button" data-cmd="Q">Q 中止</button>
+          <button class="btn quick danger" type="button" data-cmd="F">F 前进</button>
+          <button class="btn quick danger" type="button" data-cmd="B">B 后退</button>
+          <button class="btn quick" type="button" data-cmd="C">C 舵机回中</button>
+          <button class="btn quick danger" type="button" data-cmd="T">T +90°</button>
+          <button class="btn quick danger" type="button" data-cmd="T-">T- -90°</button>
+          <button class="btn quick" type="button" data-cmd="H">H 帮助</button>
+        </div>
+        <label class="gate" id="gateLabel">
+          <input id="dangerGate" type="checkbox">
+          <span>确认会动车（危险命令 A/E/F/B/G/D/P/T 默认不发送；勾选后仍需二次确认）</span>
+        </label>
+        <div id="sendHint" class="send-hint" hidden></div>
+        <div class="history">
+          <div class="history-head">
+            <span>历史记录</span>
+            <button id="btnClearHistory" class="linkbtn" type="button">清空</button>
+          </div>
+          <div id="cmdHistory" class="history-list"></div>
+        </div>
+        <p class="note">
+          实车移动一律优先用按键触发；串口命令仅在明确批准时使用。
+          <code>S</code> 停车、<code>Q</code> 中止所有动作。
+        </p>
+      </section>
+    </div>
+
+    <!-- ================= 日志 ================= -->
+    <section class="panel log" aria-label="原始日志">
+      <div class="panel-head">
+        <h2>原始日志</h2>
+        <div class="btn-row">
+          <label class="check"><input id="logPauseScroll" type="checkbox"> 暂停滚动</label>
+          <label class="check"><input id="logHideText" type="checkbox"> 只显示日志行</label>
+          <button id="btnExportLog" class="btn small" type="button">导出 .txt</button>
+          <button id="btnClearLog" class="btn small" type="button">清空</button>
+          <span class="hint" id="logCount">0 行</span>
+        </div>
+      </div>
+      <div id="logList" class="log-list" role="log" aria-live="off"></div>
+    </section>
+
+    <!-- ================= 扩展字段（可选） ================= -->
+    <details class="panel extras" aria-label="更多字段">
+      <summary>更多里程 / ridge 调试字段（可选）</summary>
+      <div id="extrasGrid" class="extras-grid"></div>
+      <p class="note">
+        这些列来自固件 1 Hz 日志的调试字段，缺失时显示 --。
+        <code>DD</code> 里程单位 cm，<code>LB</code> 是激光原始帧最后 8 字节，
+        <code>ST</code> 是已删除的旧状态机字段（仅历史日志可能出现）。
+      </p>
+    </details>
+
+    <footer class="foot">
+      <p><b>安全提示：</b><code>A/E/F/B/G/D/P/T</code> 等命令会让小车动作。测试时请把车架起或清空场地，
+        随时准备按 <code>S</code> 停车或直接断开串口。电池电压低于约 10.5 V 时固件会触发 LOW BATT STOP。</p>
+      <p>Web Serial 需要桌面版 Chrome / Edge，并且页面必须通过 <code>http://localhost</code> 或 https 打开。
+        本页无 CDN、无 npm 依赖，可完全离线使用。日志字段以 <code>USER/main.c</code>、<code>USER/fsm2.h</code> 为准。</p>
+    </footer>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    /* 启动兜底：file:// 打开或 ES module 加载失败时给出明确提示 */
+    (function () {
+      function showBootError() {
+        var el = document.getElementById('bootError');
+        if (el) el.hidden = false;
+      }
+      window.addEventListener('DOMContentLoaded', function () {
+        if (location.protocol === 'file:') showBootError();
+      });
+      setTimeout(function () {
+        if (!window.__C30D_APP_READY__) showBootError();
+      }, 2500);
+    })();
+  </script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
