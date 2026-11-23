@@ -413,6 +413,16 @@
               <FilePath>.\fsm.c</FilePath>
             </File>
             <File>
+              <FileName>fsm2.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\fsm2.c</FilePath>
+            </File>
+            <File>
+              <FileName>safety.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\safety.c</FilePath>
+            </File>
+            <File>
               <FileName>stm32f4xx_it.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\stm32f4xx_it.c</FilePath>

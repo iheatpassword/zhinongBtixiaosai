@@ -30,6 +30,8 @@
 #include "laser.h"
 #include "centering.h"
 #include "fsm.h"
+#include "fsm2.h"
+#include "safety.h"
 
 /* ----------------------------------------------------------------------- */
 /*  configuration                                                          */
@@ -46,7 +48,16 @@
 #define RUN_SPD            2400     /* counts per 20 ms while running */
 #define RUN_LAT_KP         0.0f     /* disabled: corridor has only one side wall */
 #define RUN_LAT_MAX        5.0f     /* clamp, deg                               */
-#define RUN_LAT_SIGN       (1.0f)   /* back to +1 per bench observation         */
+#define RUN_LAT_SIGN       (1.0f)   /* old forward-lateral assist sign    */
+#define EDGE_TARGET_MM     100.0f   /* left laser distance to keep        */
+#define EDGE_KP            0.10f    /* deg per mm error                   */
+#define EDGE_MAX           5.0f     /* clamp, deg                         */
+#define EDGE_SPD           900      /* forward speed while edge-following */
+#define EDGE_SIGN          (-1.0f)  /* dL<target -> steer right (positive) */
+#define EDGE_YAW_KP        3.0f     /* front/rear steer deg per deg yaw   */
+#define EDGE_YAW_KD        0.10f    /* per deg/s                          */
+#define EDGE_YAW_MAX       10.0f     /* clamp, deg                         */
+#define EDGE_YAW_SIGN      (1.0f)   /* + = right(clockwise); yaw<0 -> left */   /* back to +1 per bench observation         */
 #define RUN_YAW_KP         0.6f     /* front steering deg per deg heading error */
 #define RUN_YAW_KD         0.1f     /* per deg/s                                */
 #define RUN_YAW_MAX        5.0f     /* clamp, deg                               */
@@ -155,7 +166,21 @@ static u32 shift_t0;
 static u16 shift_base_cm;
 static u8  shift_show;
 static s16 shift_dir;          /* +1 = crab right, -1 = crab left */
-static u8  rev_state;          /* 1 = reverse run in progress */
+static u8  rev_state;
+static void abort_all(void);
+static u8  edge_mode;
+static float edge_yaw_i;
+static u8  cal_mode;
+static s8  cal_dir;
+static s32 cal_counts;
+static u8  fsm2_mode;
+static u16 fsm2_dist0;
+static u32 last_long_ms;
+static SafetyFilt g_sf;
+static SafetyCrab g_sc;
+static SafetyStall g_stall;
+static Fsm2Input  g_f2in;
+static Fsm2Output g_f2out;          /* 1 = reverse run in progress */
 static s32 rev_counts;
 static u32 rev_start_ms;
 static s32 rev_target_counts;
@@ -776,9 +801,41 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
   }
   else if (c[0] == 'A')
   {
-    cent_mode = 0u;
-    FSM_Start();
-    tx_puts(u, "OK AUTO START\r\n");
+    abort_all();
+    Fsm2_Start();
+    fsm2_mode = 1u;
+    fsm2_dist0 = App_GetDistanceCm();
+    tx_puts(u, "OK FSM2 START\r\n");
+  }
+  else if ((c[0] == 'P') || (c[0] == 'M'))
+  {
+    abort_all();
+    cal_mode = 1u;
+    cal_dir = (s8)((c[0] == 'P') ? 1 : -1);
+    cal_counts = 0;
+    yaw_deg = 0.0f;
+    App_SetServoCenter();
+    app_override = 0u;
+    open_loop = 0u;
+    motor_run = 1;
+    spd_target = 900;
+    speed_reset();
+    App_SetSteer4(8.0f * cal_dir, 8.0f * cal_dir, -8.0f * cal_dir, -8.0f * cal_dir);
+    tx_puts(u, "OK CAL START\r\n");
+  }
+  else if (c[0] == 'E')
+  {
+    abort_all();
+    edge_mode = 1u;
+    edge_yaw_i = 0.0f;
+    App_SetServoCenter();
+    {
+      s16 esp[4];
+      esp[0] = EDGE_SPD; esp[1] = EDGE_SPD; esp[2] = EDGE_SPD; esp[3] = EDGE_SPD;
+      App_SetWheelSpeed(esp);      /* app_override=1: no differential yaw */
+    }
+    speed_reset();
+    tx_puts(u, "OK EDGE START\r\n");
   }
   else if (c[0] == 'Q')
   {
@@ -840,6 +897,10 @@ static void abort_all(void)
   rev_state = 0u;
   shift_mode = 0u;
   cent_mode = 0u;
+  fsm2_mode = 0u;
+  edge_mode = 0u;
+  cal_mode = 0u;
+  Fsm2_Abort();
   app_override = 0u;
 }
 
@@ -1120,6 +1181,8 @@ int main(void)
   NVIC_DisableIRQ(USART2_IRQn);
   NVIC_ClearPendingIRQ(USART2_IRQn);
 
+  Safety_Init();
+  Fsm2_Init();
   Centering_Init();      /* needs USART2 servo bus ready */
   FSM_Init();
 
@@ -1413,11 +1476,147 @@ int main(void)
           }
         }
 
+        if (cal_mode != 0u)
+        {
+          App_SetSteer4(8.0f * cal_dir, 8.0f * cal_dir, -8.0f * cal_dir, -8.0f * cal_dir);
+          cal_counts = App_GetDistanceCm();
+          if (cal_counts >= 100)
+          {
+            cal_mode = 0u;
+            motor_run = 0;
+            speed_reset();
+            App_SetServoCenter();
+            tx_puts(UART5, "CAL DONE yaw=");
+            tx_num(UART5, (int)(yaw_deg * 10.0f));
+            tx_puts(UART5, "\r\n");
+          }
+        }
+
+        if (edge_mode != 0u)
+        {
+          float e = 0.0f;
+          float d = 0.0f;
+
+          {
+            float dy;
+            float fr, rr;
+
+            if ((g_laser.dL != 0xFFFFu) && (g_laser.dL < 1000u))
+            {
+              e = (float)g_laser.dL - EDGE_TARGET_MM;
+              d = EDGE_SIGN * EDGE_KP * e;
+              if (d >  EDGE_MAX) d =  EDGE_MAX;
+              if (d < -EDGE_MAX) d = -EDGE_MAX;
+            }
+
+            edge_yaw_i += 1.0f * yaw_deg * 0.02f;
+            if (edge_yaw_i >  5.0f) edge_yaw_i =  5.0f;
+            if (edge_yaw_i < -5.0f) edge_yaw_i = -5.0f;
+            dy = EDGE_YAW_SIGN * (EDGE_YAW_KP * yaw_deg + edge_yaw_i +
+                                  EDGE_YAW_KD * (gyro_z_dps() * GYRO_SIGN));
+            if (dy >  EDGE_YAW_MAX) dy =  EDGE_YAW_MAX;
+            if (dy < -EDGE_YAW_MAX) dy = -EDGE_YAW_MAX;
+
+            fr = d + dy;
+            rr = d - dy;
+            App_SetSteer4(fr, fr, rr, rr);
+          }
+
+          {
+            s16 esp[4];
+            esp[0] = EDGE_SPD; esp[1] = EDGE_SPD; esp[2] = EDGE_SPD; esp[3] = EDGE_SPD;
+            App_SetWheelSpeed(esp);
+          }
+
+          if (((g_laser.dF != 0xFFFFu) && (g_laser.dF <= 206u)) ||
+              ((g_laser.dF == 0xFFFFu) && (App_GetDistanceCm() > 400u)))
+          {
+            edge_mode = 0u;
+            motor_run = 0;
+            speed_reset();
+            App_SetServoCenter();
+            tx_puts(UART5, "EDGE DONE\r\n");
+          }
+        }
+
+        if (fsm2_mode != 0u)
+        {
+          SafetyRaw raw;
+          s16 spd2[4];
+
+          raw.dF = g_laser.dF; raw.dB = g_laser.dRidge;
+          raw.dL = g_laser.dL; raw.dR = g_laser.dR;
+          raw.vF = (u8)(((g_laser.flags & 0x01u) != 0u) ? 1u : 0u);
+          raw.vL = (u8)(((g_laser.flags & 0x02u) != 0u) ? 1u : 0u);
+          raw.vR = (u8)(((g_laser.flags & 0x04u) != 0u) ? 1u : 0u);
+          raw.vB = g_laser.ridge_valid;
+
+          Safety_Filter(&raw, &g_sf);
+          Safety_CrabFusion(&g_sf, &g_sc);
+          {
+            u16 apwm[4];
+            u8 wi;
+            for (wi = 0u; wi < 4u; wi++)
+            {
+              apwm[wi] = (u16)((pwm_out[wi] < 0) ? -pwm_out[wi] : pwm_out[wi]);
+            }
+            Safety_StallUpdate(&g_stall, apwm, (const s16 *)meas_spd, 20u);
+          }
+
+          if ((Safety_MinDistanceStop(&g_sf, SAFE_STOP_MM) != 0u) || (g_stall.stalled != 0u))
+          {
+            App_DriveStop();
+            Fsm2_Abort();
+            fsm2_mode = 0u;
+            tx_puts(UART5, "SAFE STOP\r\n");
+          }
+          else
+          {
+            g_f2in.dF = g_sf.dF; g_f2in.dB = g_sf.dB;
+            g_f2in.dL = g_sf.dL; g_f2in.dR = g_sf.dR;
+            g_f2in.vF = g_sf.vF; g_f2in.vB = g_sf.vB;
+            g_f2in.vL = g_sf.vL; g_f2in.vR = g_sf.vR;
+            g_f2in.dist_cm = (s32)((u16)(App_GetDistanceCm() - fsm2_dist0));
+            g_f2in.yaw_deg = yaw_deg;
+            g_f2in.stall = g_stall.stalled;
+            g_f2in.ms = ms_now();
+
+            Fsm2_Tick(&g_f2in, &g_f2out);
+
+            if (g_f2out.request_stop != 0u)
+            {
+              App_DriveStop();
+            }
+            else
+            {
+              spd2[0] = RUN_SPD; spd2[1] = RUN_SPD;
+              spd2[2] = RUN_SPD; spd2[3] = RUN_SPD;
+              switch (g_f2out.action)
+              {
+                case F2A_FWD:    App_SetSteerAll(0.0f);   App_SetWheelSpeed(spd2); break;
+                case F2A_CRAB_R: App_SetSteerAll(90.0f);  App_SetWheelSpeed(spd2); break;
+                case F2A_CRAB_L: App_SetSteerAll(-90.0f); App_SetWheelSpeed(spd2); break;
+                case F2A_REV:    App_SetSteerAll(0.0f);
+                                 spd2[0] = -RUN_SPD; spd2[1] = -RUN_SPD;
+                                 spd2[2] = -RUN_SPD; spd2[3] = -RUN_SPD;
+                                 App_SetWheelSpeed(spd2); break;
+                default:         App_DriveStop(); break;
+              }
+            }
+
+            if ((g_f2out.done != 0u) || (Fsm2_GetState() == F2_FAULT))
+            {
+              App_DriveStop();
+              fsm2_mode = 0u;
+            }
+          }
+        }
+
         g_fsm_in.laser         = g_laser;   /* volatile struct copy */
         g_fsm_in.yaw_deg       = yaw_deg;
         g_fsm_in.yaw_rate_dps  = r;
         g_fsm_in.ms            = ms_now();
-        FSM_Tick(&g_fsm_in);
+        if (fsm2_mode == 0u) FSM_Tick(&g_fsm_in);
       }
       speed_tick();
     }
@@ -1430,25 +1629,41 @@ int main(void)
 
     key_tick();
 
-    if (key_check(KF_DOUBLE) != 0u)
+    if (fsm2_mode == 0u)
     {
-      abort_all();                 /* double click: reverse 70 cm */
-      reverse_start();
-    }
-    else if (key_check(KF_SINGLE) != 0u)
-    {
-      if ((fsm_active() == 0u) && (run_state == 0u) && (cent_mode == 0u) &&
-          (shift_mode == 0u) && (rev_state == 0u))
+      if (key_check(KF_DOUBLE) != 0u)
       {
-        run_start();               /* single click: forward */
+        abort_all();                 /* double click: reverse 70 cm */
+        reverse_start();
       }
-    }
-    else if (key_check(KF_LONG) != 0u)
-    {
-      if ((fsm_active() == 0u) && (run_state == 0u) && (cent_mode == 0u) &&
-          (shift_mode == 0u) && (rev_state == 0u))
+      else if (key_check(KF_SINGLE) != 0u)
       {
-        shift_start(+1);           /* long press: crab right */
+        if ((fsm_active() == 0u) && (run_state == 0u) && (cent_mode == 0u) &&
+            (shift_mode == 0u) && (rev_state == 0u))
+        {
+          run_start();               /* single click: forward */
+        }
+      }
+      else if (key_check(KF_LONG) != 0u)
+      {
+        if ((last_long_ms != 0u) && ((ms_now() - last_long_ms) < 900u))
+        {
+          abort_all();               /* two long presses: start FSM2 */
+          Fsm2_Start();
+          fsm2_mode = 1u;
+          fsm2_dist0 = App_GetDistanceCm();
+          last_long_ms = 0u;
+          tx_puts(UART5, "FSM2 START\r\n");
+        }
+        else
+        {
+          if ((fsm_active() == 0u) && (run_state == 0u) && (cent_mode == 0u) &&
+              (shift_mode == 0u) && (rev_state == 0u))
+          {
+            shift_start(+1);         /* one long press: crab right */
+          }
+          last_long_ms = ms_now();
+        }
       }
     }
 
