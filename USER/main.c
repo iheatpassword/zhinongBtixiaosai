@@ -29,7 +29,6 @@
 #include "app_if.h"
 #include "laser.h"
 #include "centering.h"
-#include "fsm.h"
 #include "fsm2.h"
 #include "safety.h"
 
@@ -43,6 +42,9 @@
 /* single-wheel wiring/order test (USER key long press) */
 #define WHEEL_TEST_MS      1500u    /* spin window per wheel, ms            */
 #define WHEEL_TEST_PWM     2500     /* fixed open-loop PWM in the test      */
+
+/* a new FSM2 start needs all lasers this far above SAFE_STOP_MM */
+#define SAFE_RESTART_MARGIN_MM 5u
 
 /* 70 cm straight test: 4*500 lines * 30 gear = 60000 counts / wheel rev */
 #define WHEEL_DIAMETER_MM  76.4f   /* calibrated: 69 mm nominal gave 77.5 cm per 70 cm */
@@ -146,9 +148,7 @@ static float gyro_bias;
 static float yaw_deg;
 static float yaw_rate_dps;
 static int   yaw_corr;
-static FsmInput g_fsm_in;
 
-static u8 fsm_active(void);
 static u8  open_loop;        /* 1 = fixed PWM mode (diagnostic) */
 static s16 open_pwm;
 static u16 servo_angle;
@@ -867,12 +867,12 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
   c[i] = '\0';
   if (i == 0u) return;
 
-  /* movement commands are not allowed while the autonomous FSM is running */
-  if ((fsm_active() != 0u) &&
-      ((c[0] == 'F') || (c[0] == 'B') || (c[0] == 'S') ||
+  /* movement commands are not allowed while FSM2 is running (S/Q still stop) */
+  if ((fsm2_mode != 0u) &&
+      ((c[0] == 'F') || (c[0] == 'B') ||
        (c[0] == 'G') || (c[0] == 'V') || (c[0] == 'O')))
   {
-    tx_puts(u, "ERR BUSY (RSM: A/Q)\r\n");
+    tx_puts(u, "ERR BUSY (Q/S to stop)\r\n");
     return;
   }
 
@@ -957,7 +957,7 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
   }
   else if (c[0] == 'N')
   {
-    if (fsm_active() != 0u) { tx_puts(u, "ERR BUSY\r\n"); }
+    if (fsm2_mode != 0u) { tx_puts(u, "ERR BUSY\r\n"); }
     else
     {
       cent_mode = 1u;
@@ -1037,7 +1037,6 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
   }
   else if (c[0] == 'Q')
   {
-    FSM_Init();
     abort_all();                 /* full stop incl. edge/fsm2 */
     tx_puts(u, "OK AUTO ABORT\r\n");
   }
@@ -1075,15 +1074,6 @@ static void cmd_poll(CmdPort *p)
       p->line[p->len++] = (char)b;
     }
   }
-}
-
-/* ======================================================================= */
-/*  FSM helpers                                                           */
-/* ======================================================================= */
-static u8 fsm_active(void)
-{
-  CarState st = FSM_GetState();
-  return ((st == ST_ENTRY) || (st == ST_RIDGE) || (st == ST_SHIFT) || (st == ST_EXIT)) ? 1u : 0u;
 }
 
 static void abort_all(void)
@@ -1164,6 +1154,17 @@ static void key_tick(void)
 }
 
 /* start FSM2 (competition flow) */
+/* A new FSM2 run is allowed only when no safety-stop cause is still active. */
+static u8 safety_restart_ok(void)
+{
+  if (g_stall.stalled != 0u) return 0u;
+  if (Safety_MinDistanceStop(&g_sf, (u16)(SAFE_STOP_MM + SAFE_RESTART_MARGIN_MM)) != 0u)
+  {
+    return 0u;
+  }
+  return 1u;
+}
+
 static void fsm2_begin(void)
 {
   abort_all();
@@ -1390,7 +1391,6 @@ int main(void)
   Safety_Init();
   Fsm2_Init();
   Centering_Init();      /* needs USART2 servo bus ready */
-  FSM_Init();
 
   RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA1 | RCC_AHB1Periph_DMA2, ENABLE);
   NVIC_DisableIRQ(USART1_IRQn);
@@ -1449,8 +1449,7 @@ int main(void)
       {
         float r = gyro_z_dps() * GYRO_SIGN;
         yaw_rate_dps = r;
-        if (((motor_run != 0) || (fsm_active() != 0u)) &&
-            (wheel_test_mode == 0u))
+        if ((motor_run != 0) && (wheel_test_mode == 0u))
         {
           yaw_deg += r * 0.02f;   /* the wheel test spins on the spot: no yaw */
         }
@@ -1797,10 +1796,14 @@ int main(void)
           }
         }
 
-        if (fsm2_mode != 0u)
+        /* Sample the safety sensors every 20 ms, even while FSM2 is idle.
+           Otherwise a SAFE STOP freezes the median filter at the close
+           reading and the first tick of the next start re-trips before the
+           filter can see that the obstacle is gone. */
         {
           SafetyRaw raw;
-          s16 spd2[4];
+          u16 apwm[4];
+          u8 wi;
 
           raw.dF = g_laser.dF; raw.dB = g_laser.dRidge;
           raw.dL = g_laser.dL; raw.dR = g_laser.dR;
@@ -1811,15 +1814,16 @@ int main(void)
 
           Safety_Filter(&raw, &g_sf);
           Safety_CrabFusion(&g_sf, &g_sc);
+          for (wi = 0u; wi < 4u; wi++)
           {
-            u16 apwm[4];
-            u8 wi;
-            for (wi = 0u; wi < 4u; wi++)
-            {
-              apwm[wi] = (u16)((pwm_out[wi] < 0) ? -pwm_out[wi] : pwm_out[wi]);
-            }
-            Safety_StallUpdate(&g_stall, apwm, (const s16 *)meas_spd, 20u);
+            apwm[wi] = (u16)((pwm_out[wi] < 0) ? -pwm_out[wi] : pwm_out[wi]);
           }
+          Safety_StallUpdate(&g_stall, apwm, (const s16 *)meas_spd, 20u);
+        }
+
+        if (fsm2_mode != 0u)
+        {
+          s16 spd2[4];
 
           if ((Safety_MinDistanceStop(&g_sf, SAFE_STOP_MM) != 0u) || (g_stall.stalled != 0u))
           {
@@ -1901,12 +1905,6 @@ int main(void)
             }
           }
         }
-
-        g_fsm_in.laser         = g_laser;   /* volatile struct copy */
-        g_fsm_in.yaw_deg       = yaw_deg;
-        g_fsm_in.yaw_rate_dps  = r;
-        g_fsm_in.ms            = ms_now();
-        if (fsm2_mode == 0u) FSM_Tick(&g_fsm_in);
       }
       speed_tick();
     }
@@ -1932,9 +1930,20 @@ int main(void)
           wheel_t_on = ms_now();
           wheel_peak[0] = wheel_peak[1] = wheel_peak[2] = wheel_peak[3] = 0;
         }
+        else if (fsm2_mode == 0u)
+        {
+          if (safety_restart_ok() != 0u)
+          {
+            fsm2_begin();
+          }
+          else
+          {
+            tx_puts(UART5, "SAFE: MOVE AWAY\r\n");
+          }
+        }
         else
         {
-          fsm2_begin();
+          tx_puts(UART5, "FSM2 RUNNING\r\n");
         }
       }
       else if (ev == 2u)
@@ -1997,7 +2006,7 @@ int main(void)
     if ((cent_mode == 0u) && (shift_mode == 0u) && (rev_state == 0u) &&
         (fsm2_mode == 0u) && (edge_mode == 0u) && (cal_mode == 0u) &&
         (diff_cal_mode == 0u) && (run_state != 1u) &&
-        (fsm_active() == 0u) && (motor_run != 0) &&
+        (motor_run != 0) &&
         ((ms_now() - last_cmd_ms) > CMD_TIMEOUT_MS))
     {
       motor_run = 0;
@@ -2077,8 +2086,6 @@ int main(void)
         tx_num(u, (int)(g_centering.delta_deg * 10.0f));
         tx_puts(u, " CT=");
         tx_num(u, (int)(g_centering.toe_deg * 10.0f));
-        tx_puts(u, " ST=");
-        tx_num(u, (int)FSM_GetState());
         tx_puts(u, " LZ=");
         tx_puts(u, Laser_IsFresh() ? "OK " : "LOST ");
         tx_puts(u, " LS=");

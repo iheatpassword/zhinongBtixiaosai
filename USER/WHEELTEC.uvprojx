@@ -408,11 +408,6 @@
               <FilePath>.\centering.c</FilePath>
             </File>
             <File>
-              <FileName>fsm.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>.\fsm.c</FilePath>
-            </File>
-            <File>
               <FileName>fsm2.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\fsm2.c</FilePath>

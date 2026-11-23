@@ -74,31 +74,4 @@ void App_SetServoCenter(void);                     /* all servos 0 deg          
 u16  App_GetDistanceCm(void);                      /* averaged odometry, cm         */
 u32  App_MsNow(void);                              /* 1 ms free-running timebase    */
 
-/* ======================================================================= */
-/*  Competition state machine                                              */
-/* ======================================================================= */
-typedef enum
-{
-  ST_IDLE = 0,
-  ST_ENTRY,       /* enter field through the 40 cm door                */
-  ST_RIDGE,       /* drive along a ridge, laser centering              */
-  ST_SHIFT,       /* shift sideways 70 cm to the next ridge            */
-  ST_EXIT,        /* find and drive through the exit door              */
-  ST_PARK,        /* stop inside the start area                        */
-  ST_FAULT        /* sensor/link failure, motors stopped               */
-} CarState;
-
-typedef struct
-{
-  LaserData laser;
-  float yaw_deg;
-  float yaw_rate_dps;
-  u32   ms;           /* millisecond timestamp */
-} FsmInput;
-
-void     FSM_Init(void);
-void     FSM_Start(void);     /* begin the competition sequence (from ST_IDLE) */
-void     FSM_Tick(const FsmInput *in);
-CarState FSM_GetState(void);
-
 #endif
