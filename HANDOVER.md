@@ -140,7 +140,7 @@ CRC8 poly 0x07、初值 0，覆盖前 11 字节；`0xFFFF` 无效，`2000` 为�
 `USER/safety.h`：`SAFE_STOP_MM=30`、`TARGET_F_MM=206`、`TARGET_B_MM=137`、
 `STALL_PWM_MIN=10000`、`STALL_SPD_MAX=50`、`STALL_TIME_MS=300`。
 
-`USER/fsm2.h`：`ENTRY_STOP_MM=206`、`CRAB_STOP_MM=100`、`CRAB_FALLBACK_CM=260`、
+`USER/fsm2.h`：`ENTRY_STOP_MM=320`、`CRAB_STOP_MM=100`、`CRAB_FALLBACK_CM=260`、
 `REV_RIDGE_CM=70`、`REV_PARK_CM=100`、`F2_LASER_MIN_MM=30`、`F2_SETTLE_MS=600`。
 
 ---
@@ -169,7 +169,7 @@ USER/
 |---|---|
 | 编码器 70 cm | 175 620 counts → 实走 70.2 cm |
 | 垄侧 TOF 偏置 | 真实间隙 = 读数 − **37 mm**（多位置一致） |
-| 前激光 | 实测 +6 mm 偏置（206 阈值） |
+| 前激光 | 实测 +6 mm 偏置（原 206 阈值；ENTRY 停车改为 320 以留出 2600 速度的刹车距离） |
 | 左/右激光短距 | 70~100 mm 处精度 ±1 mm |
 | 左/右激光长距 | >1.2 m 偶发 2000（无回波），需滤波剔除 |
 | 舵机极性 | 正角度 = 顺时针/向右 |

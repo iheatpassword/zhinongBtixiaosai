@@ -82,7 +82,7 @@
 /* ======================================================================= */
 
 /* ENTRY: ǰ⵽ 1 ¢ֵͣ, mm */
-#define ENTRY_STOP_MM            206u
+#define ENTRY_STOP_MM            320u
 
 /* ENTRY : dF һֱЧʱǰô cm Ҳ CRAB_R1 */
 #define F2_ENTRY_FALLBACK_CM     400u
