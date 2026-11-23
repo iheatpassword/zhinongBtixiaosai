@@ -856,11 +856,11 @@ static int parse_num(const char *s)
 
 static void cmd_exec(USART_TypeDef *u, const char *line)
 {
-  char c[16];
+  char c[40];
   u8  i = 0u;
   u8  j;
 
-  while ((line[i] != '\0') && (i < 15u))
+  while ((line[i] != '\0') && (i < 39u))
   {
     c[i] = line[i];
     if ((c[i] >= 'a') && (c[i] <= 'z')) c[i] = (char)(c[i] - 'a' + 'A');
