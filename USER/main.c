@@ -201,8 +201,8 @@ static s16 edge_toe_dbg;     /* last edge front/rear toe, 0.1 deg        */
 static u16 laser_dl_hold_mm; /* last valid left-laser distance         */
 static u32 laser_dl_hold_ms;
 static u8  laser_dl_hold_ok;
-static float diff_kp = 2.0f, diff_ki = 0.5f, diff_kd = 0.3f, diff_max = 600.0f;
-static float diff_ff = -20.0f;  /* constant left/right offset, counts (pure-diff trim) */
+static float diff_kp = 0.0f, diff_ki = 0.0f, diff_kd = 0.0f, diff_max = 600.0f;
+static float diff_ff = -55.0f;  /* constant left/right offset, counts (proven 2600 pure-diff trim) */
 static float diff_i;
 static u8  diff_cal_mode;
 static s8  diff_cal_dir;
