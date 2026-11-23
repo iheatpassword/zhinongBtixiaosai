@@ -59,7 +59,7 @@
 #define EDGE_TARGET_LATCH_MAX_MM 120u /* latch the first dL below this      */
 #define EDGE_KP            0.0f     /* 0 = pure differential (no steering); restore 0.10 for 4WS edge */
 #define EDGE_MAX           5.0f     /* clamp, deg                         */
-#define EDGE_SPD           1200     /* forward speed while edge/ENTRY runs */
+#define EDGE_SPD           2600     /* forward speed while edge/ENTRY runs */
 #define EDGE_SIGN          (-1.0f)  /* positive servo = right; verified by the FF=0 run: negative command moves the car left */
 #define EDGE_YAW_KP        0.0f     /* front/rear steer deg per deg yaw   */
 #define EDGE_YAW_KD        0.10f    /* per deg/s                          */
