@@ -908,14 +908,8 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
   else if ((c[0] == 'S') || (c[0] == 'X'))
   {
     cent_show = 0u;
-    shift_mode = 0u;
     shift_show = 0u;
-    cent_mode = 0u;
-    run_state = 0u;
-    app_override = 0u;
-    open_loop = 0u;
-    motor_run = 0;
-    speed_reset();
+    abort_all();                 /* clears edge/fsm2/run/shift/... too */
     tx_puts(u, "OK STOP\r\n");
   }
   else if (c[0] == 'O')
@@ -1043,9 +1037,8 @@ static void cmd_exec(USART_TypeDef *u, const char *line)
   }
   else if (c[0] == 'Q')
   {
-    cent_mode = 0u;
     FSM_Init();
-    App_DriveStop();
+    abort_all();                 /* full stop incl. edge/fsm2 */
     tx_puts(u, "OK AUTO ABORT\r\n");
   }
   else if ((c[0] == 'H') || (c[0] == '?'))
@@ -1108,6 +1101,7 @@ static void abort_all(void)
   wheel_test_mode = 0u;        /* any abort also leaves the wheel test */
   Fsm2_Abort();
   app_override = 0u;
+  open_loop = 0u;
 }
 
 /* ---- key driver: 1/2/3 clicks + long press, non-blocking --------------- */
