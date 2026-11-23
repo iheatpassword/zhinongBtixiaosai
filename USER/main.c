@@ -196,6 +196,7 @@ static float edge_yaw_i;
 static u16 edge_target_mm;   /* latched left-laser target for this run */
 static u8  edge_target_ok;
 static u16 edge_base_cm;     /* odometry baseline for the edge run     */
+static s16 edge_steer_dbg;   /* last edge/ENTRY steer command, 0.1 deg */
 static float diff_kp = 1.0f, diff_ki = 0.0f, diff_kd = 0.0f, diff_max = 600.0f;
 static float diff_ff = -55.0f;  /* constant left/right offset, counts      */
 static float diff_i;
@@ -1823,6 +1824,7 @@ int main(void)
               if (d >  EDGE_MAX) d =  EDGE_MAX;
               if (d < -EDGE_MAX) d = -EDGE_MAX;
             }
+            edge_steer_dbg = (s16)(d * 10.0f);
 
             edge_yaw_i += 1.0f * yaw_deg * 0.02f;
             if (edge_yaw_i >  5.0f) edge_yaw_i =  5.0f;
@@ -1951,6 +1953,7 @@ int main(void)
                       if (d2 >  EDGE_MAX) d2 =  EDGE_MAX;
                       if (d2 < -EDGE_MAX) d2 = -EDGE_MAX;
                     }
+                    edge_steer_dbg = (s16)(d2 * 10.0f);
                     App_SetSteer4(d2, d2, d2, d2);
                     r2 = gyro_z_dps() * GYRO_SIGN;
                     diff_i += diff_ki * yaw_deg * 0.02f;
@@ -2220,6 +2223,8 @@ int main(void)
         tx_num(u, (int)diff_ff);
         tx_puts(u, " ET=");
         tx_num(u, (edge_target_ok != 0u) ? (int)edge_target_mm : 0);
+        tx_puts(u, " ES=");
+        tx_num(u, (int)edge_steer_dbg);
         tx_puts(u, " SVO=");
         tx_num(u, (int)servo_angle);
         tx_puts(u, " P=");
