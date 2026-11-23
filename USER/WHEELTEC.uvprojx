@@ -402,16 +402,16 @@
               <FileType>1</FileType>
               <FilePath>.\laser.c</FilePath>
             </File>
-          <File>
-            <FileName>centering.c</FileName>
-            <FileType>1</FileType>
-            <FilePath>.\centering.c</FilePath>
-          </File>
-          <File>
-            <FileName>fsm.c</FileName>
-            <FileType>1</FileType>
-            <FilePath>.\fsm.c</FilePath>
-          </File>
+            <File>
+              <FileName>centering.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\centering.c</FilePath>
+            </File>
+            <File>
+              <FileName>fsm.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\fsm.c</FilePath>
+            </File>
             <File>
               <FileName>stm32f4xx_it.c</FileName>
               <FileType>1</FileType>

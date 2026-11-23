@@ -41,8 +41,16 @@
 /* 70 cm straight test: 4*500 lines * 30 gear = 60000 counts / wheel rev */
 #define WHEEL_DIAMETER_MM  76.4f   /* calibrated: 69 mm nominal gave 77.5 cm per 70 cm */
 #define ENCODER_CPR        60000.0f
-#define RUN_CM             70.0f
-#define RUN_SPD            900      /* counts per 20 ms while running */
+#define RUN_CM             100.0f
+#define REV_CM             70.0f
+#define RUN_SPD            2400     /* counts per 20 ms while running */
+#define RUN_LAT_KP         0.0f     /* disabled: corridor has only one side wall */
+#define RUN_LAT_MAX        5.0f     /* clamp, deg                               */
+#define RUN_LAT_SIGN       (1.0f)   /* back to +1 per bench observation         */
+#define RUN_YAW_KP         0.6f     /* front steering deg per deg heading error */
+#define RUN_YAW_KD         0.1f     /* per deg/s                                */
+#define RUN_YAW_MAX        5.0f     /* clamp, deg                               */
+#define RUN_YAW_SIGN       (1.0f)   /* flip if heading runs away                */
 #define RUN_TIMEOUT_MS     15000u
 #define CENT_TEST_SPD      600      /* centering test base speed counts/20ms */
 #define CENT_TEST_CM       150u     /* centering test distance, cm */
@@ -140,14 +148,17 @@ static u8  cent_show;        /* 1 = show centering result on OLED */
 static u32 cent_start_ms;
 
 /* USER-key long press = 70 cm crab lane-shift test */
-static u32 key_down_ms;
-static u8  key_hold;
 static u8  shift_mode;
 static u8  shift_phase;
 static u32 shift_start_ms;
 static u32 shift_t0;
 static u16 shift_base_cm;
 static u8  shift_show;
+static s16 shift_dir;          /* +1 = crab right, -1 = crab left */
+static u8  rev_state;          /* 1 = reverse run in progress */
+static s32 rev_counts;
+static u32 rev_start_ms;
+static s32 rev_target_counts;
 static s16 shift_doff_dbg;
 static s16 shift_af_dbg;
 static s16 shift_ridge_dbg;
@@ -159,10 +170,16 @@ static u16 shift_yaw_fault_cnt;
 static u32 next_heartbeat;
 static u16 cent_base_cm;     /* odometry baseline at test start */
 static u8  run_state;        /* 0 idle, 1 running, 2 done */
-static s32 run_counts;       /* average encoder counts travelled */
+static s32 run_counts;
+static s32 last_run_counts;
+static s16 run_lat_off_dbg;
+static s32 run_hist_cnt[3];
+static s16 run_hist_yaw[3];
+static u8  run_hist_n;
+static s16 run_lat_deg_dbg;
+static s16 run_yaw_deg_dbg;       /* average encoder counts travelled */
 static s32 run_target;       /* counts for 70 cm */
 static u32 run_start_ms;
-static u8  key_last;
 
 /* ======================================================================= */
 /*  1 ms time base (TIM6) - the official ms_now() does not run in    */
@@ -411,6 +428,7 @@ static void speed_tick(void)
     corr = (int)(YAW_KP * yaw_deg + YAW_KD * rate);
     if (corr > YAW_CORR_MAX)  corr = YAW_CORR_MAX;
     if (corr < -YAW_CORR_MAX) corr = -YAW_CORR_MAX;
+    if (motor_run < 0) corr = -corr;   /* reverse: mirror the correction */
     yaw_corr = corr;
   }
 
@@ -472,6 +490,7 @@ static void speed_tick(void)
   }
   if (motor_run != 0) odom_counts += (raw_sum / 4);
   if (run_state == 1u) run_counts += (raw_sum / 4);
+  if (rev_state == 1u) rev_counts += (raw_sum / 4);
   speed_apply();
 }
 
@@ -480,6 +499,7 @@ static void run_start(void)
   run_counts = 0;
   run_start_ms = ms_now();
   yaw_deg = 0.0f;
+  App_SetServoCenter();
   run_state = 1u;
   app_override = 0u;
   open_loop = 0u;
@@ -493,6 +513,15 @@ static void run_start(void)
 
 static void run_stop(const char *why)
 {
+  /* keep the last three runs for later readout */
+  run_hist_cnt[0] = run_hist_cnt[1];
+  run_hist_cnt[1] = run_hist_cnt[2];
+  run_hist_cnt[2] = run_counts;
+  run_hist_yaw[0] = run_hist_yaw[1];
+  run_hist_yaw[1] = run_hist_yaw[2];
+  run_hist_yaw[2] = (s16)(yaw_deg * 10.0f);
+  if (run_hist_n < 3u) run_hist_n++;
+  last_run_counts = run_counts;
   motor_run = 0;
   speed_reset();
   run_state = 2u;
@@ -803,9 +832,119 @@ static u8 fsm_active(void)
   return ((st == ST_ENTRY) || (st == ST_RIDGE) || (st == ST_SHIFT) || (st == ST_EXIT)) ? 1u : 0u;
 }
 
-static void shift_start(void)
+static void abort_all(void)
+{
+  motor_run = 0;
+  speed_reset();
+  run_state = 0u;
+  rev_state = 0u;
+  shift_mode = 0u;
+  cent_mode = 0u;
+  app_override = 0u;
+}
+
+/* ---- non-blocking key driver (single / double / long) ------------------ */
+#define KF_DOWN    0x01u
+#define KF_UP      0x02u
+#define KF_HOLD    0x04u
+#define KF_SINGLE  0x08u
+#define KF_DOUBLE  0x10u
+#define KF_LONG    0x20u
+#define KF_REPEAT  0x40u
+
+#define KEY_T_DOUBLE  50u    /* 250 ms  */
+#define KEY_T_LONG    240u   /* 1200 ms */
+#define KEY_T_REPEAT  20u    /* 100 ms  */
+
+static u8  key_flags;
+static u8  key_cnt;
+static u8  key_s;            /* 0 idle,1 pressed,2 released,3 double,4 long */
+static u8  key_curr, key_prev;
+static u16 key_time;
+
+static u8 key_raw(void)
+{
+  return (GPIO_ReadInputDataBit(GPIOE, GPIO_Pin_0) == Bit_RESET) ? 1u : 0u;
+}
+
+static void key_tick(void)
+{
+  if (key_time > 0u) key_time--;
+
+  key_cnt++;
+  if (key_cnt < 4u) return;          /* sample every 20 ms */
+  key_cnt = 0u;
+
+  key_prev = key_curr;
+  key_curr = key_raw();
+
+  if (key_curr != 0u) key_flags |= KF_HOLD;
+  else                key_flags &= (u8)~KF_HOLD;
+
+  if ((key_curr != 0u) && (key_prev == 0u)) { key_flags |= KF_DOWN; tx_puts(UART5, "KD\r\n"); }
+  if ((key_curr == 0u) && (key_prev != 0u)) { key_flags |= KF_UP;   tx_puts(UART5, "KU\r\n"); }
+
+  if (key_s == 0u)
+  {
+    if (key_curr != 0u) { key_time = KEY_T_LONG; key_s = 1u; }
+  }
+  else if (key_s == 1u)
+  {
+    if (key_curr == 0u) { key_time = KEY_T_DOUBLE; key_s = 2u; }
+    else if (key_time == 0u)
+    {
+      key_time = KEY_T_REPEAT;
+      key_flags |= KF_LONG;
+      tx_puts(UART5, "KL\r\n");
+      key_s = 4u;
+    }
+  }
+  else if (key_s == 2u)
+  {
+    if (key_curr != 0u) { key_flags |= KF_DOUBLE; tx_puts(UART5, "KD2\r\n"); key_s = 3u; }
+    else if (key_time == 0u) { key_flags |= KF_SINGLE; tx_puts(UART5, "KS\r\n"); key_s = 0u; }
+  }
+  else if (key_s == 3u)
+  {
+    if (key_curr == 0u) key_s = 0u;
+  }
+  else if (key_s == 4u)
+  {
+    if (key_curr == 0u) key_s = 0u;
+    else if (key_time == 0u) { key_time = KEY_T_REPEAT; key_flags |= KF_REPEAT; }
+  }
+}
+
+static u8 key_check(u8 f)
+{
+  if ((key_flags & f) != 0u)
+  {
+    if (f != KF_HOLD) key_flags &= (u8)~f;
+    return 1u;
+  }
+  return 0u;
+}
+
+static void reverse_start(void)
+{
+  rev_counts = 0;
+  rev_start_ms = ms_now();
+  yaw_deg = 0.0f;
+  App_SetServoCenter();
+  rev_state = 1u;
+  app_override = 0u;
+  open_loop = 0u;
+  motor_run = -1;
+  spd_target = RUN_SPD;
+  speed_reset();
+  tx_puts(USART1, "REV START\r\n");
+  tx_puts(UART5,  "REV START\r\n");
+}
+
+static void shift_start(s16 dir)
 {
   shift_mode  = 1u;
+  shift_dir   = dir;
   shift_show  = 0u;
   shift_phase = 0u;
   shift_start_ms = ms_now();
@@ -817,7 +956,7 @@ static void shift_start(void)
   shift_df_filt = 0.0f;
   ridge_integ = 0.0f;
   App_DriveStop();
-  App_SetSteerAll(90.0f);        /* all four wheels crab 90 deg */
+  App_SetSteerAll((float)(90 * dir));   /* all four wheels crab 90 deg */
   tx_puts(USART1, "SHIFT START\r\n");
   tx_puts(UART5,  "SHIFT START\r\n");
 }
@@ -1010,8 +1149,8 @@ int main(void)
   delay_ms(50u);
   servo_broadcast_deg(0);      /* repeat: a reset mid-shift must still centre the servos */
   run_target = (s32)((RUN_CM * 10.0f / (3.14159f * WHEEL_DIAMETER_MM)) * ENCODER_CPR);
+  rev_target_counts = (s32)((REV_CM * 10.0f / (3.14159f * WHEEL_DIAMETER_MM)) * ENCODER_CPR);
   run_state = 0u;
-  key_last = 0u;
   spd_target = SPD_DEFAULT;
   motor_run = 0;
   speed_reset();
@@ -1042,6 +1181,19 @@ int main(void)
         float r = gyro_z_dps() * GYRO_SIGN;
         yaw_rate_dps = r;
         if ((motor_run != 0) || (fsm_active() != 0u)) yaw_deg += r * 0.02f;
+
+        if (rev_state != 0u)
+        {
+          if ((rev_counts >= rev_target_counts) || ((ms_now() - rev_start_ms) > 30000u))
+          {
+            rev_state = 0u;
+            motor_run = 0;
+            speed_reset();
+            last_run_counts = rev_counts;
+            tx_puts(USART1, "REV DONE\r\n");
+            tx_puts(UART5,  "REV DONE\r\n");
+          }
+        }
 
         if (shift_mode != 0u)
         {
@@ -1079,7 +1231,7 @@ int main(void)
             if (doff >  RIDGE_OFFSET_MAX) doff =  RIDGE_OFFSET_MAX;
             if (doff < 0.0f) doff = 0.0f;
             shift_ridge_dbg = (s16)(doff * 10.0f);
-            a = 90.0f + doff;
+            a = (float)(90 * shift_dir) + doff;
 
             /* outer loop: front-laser distance -> slow heading target so that
                the car axis stays parallel to the ridge wall                  */
@@ -1232,6 +1384,35 @@ int main(void)
           }
         }
 
+        if (run_state == 1u)
+        {
+          {
+            float rdps = gyro_z_dps() * GYRO_SIGN;
+            float sd   = RUN_YAW_KP * yaw_deg + RUN_YAW_KD * rdps;
+            if (sd >  RUN_YAW_MAX) sd =  RUN_YAW_MAX;
+            if (sd < -RUN_YAW_MAX) sd = -RUN_YAW_MAX;
+            sd *= RUN_YAW_SIGN;
+            run_yaw_deg_dbg = (s16)(sd * 10.0f);
+            App_SetSteer4(sd, sd, 0.0f, 0.0f);   /* front steer, rear straight */
+          }
+
+          if ((g_laser.dL != 0xFFFFu) && (g_laser.dR != 0xFFFFu) &&
+              (g_laser.dL < 1000u) && (g_laser.dR < 1000u))
+          {
+            float off = ((float)g_laser.dL - (float)g_laser.dR) * 0.5f;
+            float dd  = 0.0f;
+            if ((off > 15.0f) || (off < -15.0f))
+            {
+              dd = RUN_LAT_SIGN * RUN_LAT_KP * off;
+            }
+            run_lat_off_dbg = (s16)off;
+            run_lat_deg_dbg = (s16)(dd * 10.0f);
+            if (dd >  RUN_LAT_MAX) dd =  RUN_LAT_MAX;
+            if (dd < -RUN_LAT_MAX) dd = -RUN_LAT_MAX;
+            App_SetSteer4(dd, dd, dd, dd);
+          }
+        }
+
         g_fsm_in.laser         = g_laser;   /* volatile struct copy */
         g_fsm_in.yaw_deg       = yaw_deg;
         g_fsm_in.yaw_rate_dps  = r;
@@ -1247,33 +1428,28 @@ int main(void)
     cmd_poll(&port3);
     cmd_poll(&port5);
 
-    /* USER key (PE0, active low): start the 70 cm straight run */
-    {
-      u8 k = (GPIO_ReadInputDataBit(GPIOE, GPIO_Pin_0) == Bit_RESET) ? 1u : 0u;
-      if ((k != 0u) && (key_last == 0u))
-      {
-        key_down_ms = ms_now();
-        key_hold = 1u;
-      }
-      else if ((k == 0u) && (key_last != 0u) && (key_hold != 0u))
-      {
-        u32 dur = ms_now() - key_down_ms;
-        key_hold = 0u;
+    key_tick();
 
-        if ((fsm_active() == 0u) && (run_state == 0u) &&
-            (cent_mode == 0u) && (shift_mode == 0u))
-        {
-          if (dur >= 1200u)
-          {
-            shift_start();          /* long press: crab 100 cm (进垄) */
-          }
-          else
-          {
-            run_start();            /* short press: forward 70 cm (换垄) */
-          }
-        }
+    if (key_check(KF_DOUBLE) != 0u)
+    {
+      abort_all();                 /* double click: reverse 70 cm */
+      reverse_start();
+    }
+    else if (key_check(KF_SINGLE) != 0u)
+    {
+      if ((fsm_active() == 0u) && (run_state == 0u) && (cent_mode == 0u) &&
+          (shift_mode == 0u) && (rev_state == 0u))
+      {
+        run_start();               /* single click: forward */
       }
-      key_last = k;
+    }
+    else if (key_check(KF_LONG) != 0u)
+    {
+      if ((fsm_active() == 0u) && (run_state == 0u) && (cent_mode == 0u) &&
+          (shift_mode == 0u) && (rev_state == 0u))
+      {
+        shift_start(+1);           /* long press: crab right */
+      }
     }
 
     if ((run_state == 1u) && (run_counts >= run_target))
@@ -1293,7 +1469,7 @@ int main(void)
       tx_puts(UART5, "LOW BATT STOP\r\n");
     }
 
-    if ((cent_mode == 0u) && (shift_mode == 0u) && (run_state != 1u) &&
+    if ((cent_mode == 0u) && (shift_mode == 0u) && (rev_state == 0u) && (run_state != 1u) &&
         (fsm_active() == 0u) && (motor_run != 0) &&
         ((ms_now() - last_cmd_ms) > CMD_TIMEOUT_MS))
     {
@@ -1335,8 +1511,27 @@ int main(void)
           tx_putc(u, ' ');
         }
         batt_volt = (float)Get_Adc(9) * 3.3f * 11.0f * 0.99f / 4096.0f;
-        tx_puts(u, "VB=");
+        tx_puts(u, " K=");
+        tx_num(u, (int)key_raw());
+        tx_puts(u, " VB=");
         tx_num(u, (int)(batt_volt * 10.0f));
+        tx_puts(u, " SY=");
+        tx_num(u, (int)run_yaw_deg_dbg);
+        tx_puts(u, " R1=");
+        tx_num(u, (int)run_hist_cnt[0]); tx_putc(u, ',');
+        tx_num(u, (int)run_hist_yaw[0]);
+        tx_puts(u, " R2=");
+        tx_num(u, (int)run_hist_cnt[1]); tx_putc(u, ',');
+        tx_num(u, (int)run_hist_yaw[1]);
+        tx_puts(u, " R3=");
+        tx_num(u, (int)run_hist_cnt[2]); tx_putc(u, ',');
+        tx_num(u, (int)run_hist_yaw[2]);
+        tx_puts(u, " LE=");
+        tx_num(u, (int)run_lat_off_dbg);
+        tx_puts(u, " LD=");
+        tx_num(u, (int)run_lat_deg_dbg);
+        tx_puts(u, " LC=");
+        tx_num(u, (int)last_run_counts);
         tx_puts(u, " DD=");
         tx_num(u, (int)((u16)(App_GetDistanceCm() - shift_base_cm)));
         tx_puts(u, " RD=");
