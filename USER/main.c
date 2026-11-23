@@ -60,7 +60,7 @@
 #define EDGE_KP            0.10f    /* deg per mm error                   */
 #define EDGE_MAX           5.0f     /* clamp, deg                         */
 #define EDGE_SPD           2600     /* forward speed while edge-following */
-#define EDGE_SIGN          (-1.0f)  /* dL<target -> steer right (positive) */
+#define EDGE_SIGN          (1.0f)   /* sign fixed 2026-11-23: positive servo steers left in this car, so dL<target must command negative (right) */
 #define EDGE_YAW_KP        0.0f     /* front/rear steer deg per deg yaw   */
 #define EDGE_YAW_KD        0.10f    /* per deg/s                          */
 #define EDGE_YAW_MAX       10.0f     /* clamp, deg                         */
@@ -197,6 +197,9 @@ static u16 edge_target_mm;   /* latched left-laser target for this run */
 static u8  edge_target_ok;
 static u16 edge_base_cm;     /* odometry baseline for the edge run     */
 static s16 edge_steer_dbg;   /* last edge/ENTRY steer command, 0.1 deg */
+static u16 laser_dl_hold_mm; /* last valid left-laser distance         */
+static u32 laser_dl_hold_ms;
+static u8  laser_dl_hold_ok;
 static float diff_kp = 1.0f, diff_ki = 0.0f, diff_kd = 0.0f, diff_max = 600.0f;
 static float diff_ff = -55.0f;  /* constant left/right offset, counts      */
 static float diff_i;
@@ -1192,6 +1195,28 @@ static u8 safety_restart_ok(void)
   return 1u;
 }
 
+/* Left-laser dropout compensation: hold the last valid dL for 300 ms.
+   The hardware link is still flaky; this keeps the edge loop running over
+   short dropouts instead of punching the steering to 0 every lost frame. */
+static u16 edge_dl_read(void)
+{
+  u32 now = ms_now();
+
+  if ((g_laser.dL != 0xFFFFu) && ((g_laser.flags & 0x02u) != 0u))
+  {
+    laser_dl_hold_mm = g_laser.dL;
+    laser_dl_hold_ms = now;
+    laser_dl_hold_ok = 1u;
+    return laser_dl_hold_mm;
+  }
+  if ((laser_dl_hold_ok != 0u) && ((now - laser_dl_hold_ms) <= 300u))
+  {
+    return laser_dl_hold_mm;
+  }
+  laser_dl_hold_ok = 0u;
+  return 0xFFFFu;
+}
+
 static void edge_target_reset(void)
 {
   edge_target_ok = 0u;
@@ -1802,24 +1827,25 @@ int main(void)
         {
           float e = 0.0f;
           float d = 0.0f;
+          u16   dl = edge_dl_read();
 
           {
             float dy;
             float fr, rr;
 
             if ((edge_target_ok == 0u) &&
-                (g_laser.dL != 0xFFFFu) &&
-                (g_laser.dL >= EDGE_TARGET_MIN_MM) &&
-                (g_laser.dL <= EDGE_TARGET_LATCH_MAX_MM))
+                (dl != 0xFFFFu) &&
+                (dl >= EDGE_TARGET_MIN_MM) &&
+                (dl <= EDGE_TARGET_LATCH_MAX_MM))
             {
-              edge_target_mm = g_laser.dL;
+              edge_target_mm = dl;
               edge_target_ok = 1u;
             }
 
             if ((edge_target_ok != 0u) &&
-                (g_laser.dL != 0xFFFFu) && (g_laser.dL < 1000u))
+                (dl != 0xFFFFu) && (dl < 1000u))
             {
-              e = (float)g_laser.dL - (float)edge_target_mm;
+              e = (float)dl - (float)edge_target_mm;
               d = EDGE_SIGN * EDGE_KP * e;
               if (d >  EDGE_MAX) d =  EDGE_MAX;
               if (d < -EDGE_MAX) d = -EDGE_MAX;
@@ -1936,19 +1962,20 @@ int main(void)
                   {
                     s16 esp[4];
                     float e2 = 0.0f, d2 = 0.0f, c2, r2;
+                    u16   dl = edge_dl_read();
                     if ((edge_target_ok == 0u) &&
-                        (g_sf.dL != 0xFFFFu) &&
-                        (g_sf.dL >= EDGE_TARGET_MIN_MM) &&
-                        (g_sf.dL <= EDGE_TARGET_LATCH_MAX_MM))
+                        (dl != 0xFFFFu) &&
+                        (dl >= EDGE_TARGET_MIN_MM) &&
+                        (dl <= EDGE_TARGET_LATCH_MAX_MM))
                     {
-                      edge_target_mm = g_sf.dL;
+                      edge_target_mm = dl;
                       edge_target_ok = 1u;
                     }
 
                     if ((edge_target_ok != 0u) &&
-                        (g_sf.dL != 0xFFFFu) && (g_sf.dL < 1000u))
+                        (dl != 0xFFFFu) && (dl < 1000u))
                     {
-                      e2 = (float)g_sf.dL - (float)edge_target_mm;
+                      e2 = (float)dl - (float)edge_target_mm;
                       d2 = EDGE_SIGN * EDGE_KP * e2;
                       if (d2 >  EDGE_MAX) d2 =  EDGE_MAX;
                       if (d2 < -EDGE_MAX) d2 = -EDGE_MAX;
