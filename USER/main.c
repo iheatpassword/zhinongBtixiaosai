@@ -55,7 +55,8 @@
 #define RUN_LAT_KP         0.0f     /* disabled: corridor has only one side wall */
 #define RUN_LAT_MAX        5.0f     /* clamp, deg                               */
 #define RUN_LAT_SIGN       (1.0f)   /* old forward-lateral assist sign    */
-#define EDGE_TARGET_MM     100.0f   /* left laser distance to keep        */
+#define EDGE_TARGET_MIN_MM 40u      /* never latch a target closer than this */
+#define EDGE_TARGET_LATCH_MAX_MM 120u /* latch the first dL below this      */
 #define EDGE_KP            0.10f    /* deg per mm error                   */
 #define EDGE_MAX           5.0f     /* clamp, deg                         */
 #define EDGE_SPD           2600     /* forward speed while edge-following */
@@ -191,6 +192,8 @@ static u16 diff_test_base;
 static s16 diff_test_pwm = 2500;
 static u8  edge_mode;
 static float edge_yaw_i;
+static u16 edge_target_mm;   /* latched left-laser target for this run */
+static u8  edge_target_ok;
 static float diff_kp = 2.0f, diff_ki = 0.5f, diff_kd = 0.0f, diff_max = 150.0f;
 static float diff_ff = 0.0f;   /* constant left/right offset, counts      */
 static float diff_i;
@@ -719,7 +722,15 @@ static void screen(void)
     OLED_ShowString(0, 0, (u8 *)"EDGE / ENTRY");
     OLED_ShowString(0, 10, (u8 *)"L=");
     OLED_ShowNumber(24, 10, (u32)((g_sf.dL == 0xFFFFu) ? 0u : g_sf.dL), 4, 12);
-    OLED_ShowString(0, 20, (u8 *)"TGT=100");
+    OLED_ShowString(0, 20, (u8 *)"TGT=");
+    if (edge_target_ok != 0u)
+    {
+      OLED_ShowNumber(32, 20, (u32)edge_target_mm, 3, 12);
+    }
+    else
+    {
+      OLED_ShowString(32, 20, (u8 *)"---");
+    }
     OLED_ShowString(0, 30, (u8 *)"DB=");
     OLED_ShowNumber(24, 30, (u32)((g_sf.dB == 0xFFFFu) ? 0u : g_sf.dB), 4, 12);
     OLED_ShowString(0, 40, (u8 *)"YAW=");
@@ -1172,9 +1183,27 @@ static u8 safety_restart_ok(void)
   return 1u;
 }
 
+static void edge_target_reset(void)
+{
+  edge_target_ok = 0u;
+  edge_target_mm = 0u;
+
+  /* If the car is already within the 40..120 mm band when the run starts,
+     hold that distance.  Otherwise leave the target unlatched and take the
+     first dL < 120 mm after the car starts moving. */
+  if ((g_laser.dL != 0xFFFFu) &&
+      (g_laser.dL >= EDGE_TARGET_MIN_MM) &&
+      (g_laser.dL <= EDGE_TARGET_LATCH_MAX_MM))
+  {
+    edge_target_mm = g_laser.dL;
+    edge_target_ok = 1u;
+  }
+}
+
 static void fsm2_begin(void)
 {
   abort_all();
+  edge_target_reset();
   Fsm2_Start();
   fsm2_mode = 1u;
   fsm2_dist0 = App_GetDistanceCm();
@@ -1189,6 +1218,7 @@ static void edge_begin(void)
   s16 esp[4];
 
   abort_all();
+  edge_target_reset();
   edge_mode = 1u;
   edge_yaw_i = 0.0f;
   diff_i = 0.0f;
@@ -1750,9 +1780,19 @@ int main(void)
             float dy;
             float fr, rr;
 
-            if ((g_laser.dL != 0xFFFFu) && (g_laser.dL < 1000u))
+            if ((edge_target_ok == 0u) &&
+                (g_laser.dL != 0xFFFFu) &&
+                (g_laser.dL >= EDGE_TARGET_MIN_MM) &&
+                (g_laser.dL <= EDGE_TARGET_LATCH_MAX_MM))
             {
-              e = (float)g_laser.dL - EDGE_TARGET_MM;
+              edge_target_mm = g_laser.dL;
+              edge_target_ok = 1u;
+            }
+
+            if ((edge_target_ok != 0u) &&
+                (g_laser.dL != 0xFFFFu) && (g_laser.dL < 1000u))
+            {
+              e = (float)g_laser.dL - (float)edge_target_mm;
               d = EDGE_SIGN * EDGE_KP * e;
               if (d >  EDGE_MAX) d =  EDGE_MAX;
               if (d < -EDGE_MAX) d = -EDGE_MAX;
@@ -1867,9 +1907,19 @@ int main(void)
                   {
                     s16 esp[4];
                     float e2 = 0.0f, d2 = 0.0f, c2, r2;
-                    if ((g_sf.dL != 0xFFFFu) && (g_sf.dL < 1000u))
+                    if ((edge_target_ok == 0u) &&
+                        (g_sf.dL != 0xFFFFu) &&
+                        (g_sf.dL >= EDGE_TARGET_MIN_MM) &&
+                        (g_sf.dL <= EDGE_TARGET_LATCH_MAX_MM))
                     {
-                      e2 = (float)g_sf.dL - EDGE_TARGET_MM;
+                      edge_target_mm = g_sf.dL;
+                      edge_target_ok = 1u;
+                    }
+
+                    if ((edge_target_ok != 0u) &&
+                        (g_sf.dL != 0xFFFFu) && (g_sf.dL < 1000u))
+                    {
+                      e2 = (float)g_sf.dL - (float)edge_target_mm;
                       d2 = EDGE_SIGN * EDGE_KP * e2;
                       if (d2 >  EDGE_MAX) d2 =  EDGE_MAX;
                       if (d2 < -EDGE_MAX) d2 = -EDGE_MAX;
@@ -2126,6 +2176,8 @@ int main(void)
         tx_num(u, yaw_corr);
         tx_puts(u, " FF=");
         tx_num(u, (int)diff_ff);
+        tx_puts(u, " ET=");
+        tx_num(u, (edge_target_ok != 0u) ? (int)edge_target_mm : 0);
         tx_puts(u, " SVO=");
         tx_num(u, (int)servo_angle);
         tx_puts(u, " P=");

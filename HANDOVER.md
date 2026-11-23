@@ -131,7 +131,7 @@ CRC8 poly 0x07、初值 0，覆盖前 11 字节；`0xFFFF` 无效，`2000` 为�
 | `RIDGE_FF_DEG` / `RIDGE_KP` / `RIDGE_KI` | 7.5 / 0.02 / 0.004 | 蟹行垄侧 PI |
 | `RIDGE_TARGET_MM` | 148 | 垄侧 TOF 目标（含 +37 安装偏置） |
 | `EDGE_SPD` | 2600 | 贴边/ENTRY 前进速度 |
-| `EDGE_TARGET_MM` | 100 | 左激光目标 |
+| 左激光目标 | 动态锁存 | 启动时 dL∈[40,120] 直接锁存；否则等开车后第一次 dL<120 再锁存；之后保持不变（日志 `ET=`） |
 | `EDGE_KP` / `EDGE_SIGN` | 0.10 / −1 | 横向纠偏 |
 | `EDGE_YAW_KP` | 0.0（暂时关闭） | 转向航向 |
 | `diff_kp/ki/kd/max` | 2.0 / 0.5 / 0 / 150（默认，可 `K` 改） | 差速航向 PID |
