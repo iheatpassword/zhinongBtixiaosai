@@ -1171,6 +1171,7 @@ static void fsm2_begin(void)
   fsm2_mode = 1u;
   fsm2_dist0 = App_GetDistanceCm();
   diff_i = 0.0f;
+  yaw_deg = 0.0f;             /* heading reference = current placement */
   tx_puts(UART5, "FSM2 START\r\n");
 }
 
@@ -1183,6 +1184,7 @@ static void edge_begin(void)
   edge_mode = 1u;
   edge_yaw_i = 0.0f;
   diff_i = 0.0f;
+  yaw_deg = 0.0f;             /* heading reference = current placement */
   App_SetServoCenter();
   esp[0] = EDGE_SPD; esp[1] = EDGE_SPD; esp[2] = EDGE_SPD; esp[3] = EDGE_SPD;
   App_SetWheelSpeed(esp);
