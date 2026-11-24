@@ -57,10 +57,11 @@
 #define RUN_LAT_SIGN       (1.0f)   /* old forward-lateral assist sign    */
 #define EDGE_TARGET_MIN_MM 40u      /* never latch a target closer than this */
 #define EDGE_TARGET_LATCH_MAX_MM 120u /* latch the first dL below this      */
-#define EDGE_KP            0.0f     /* 0 = pure differential (no steering); restore 0.10 for 4WS edge */
+#define EDGE_KP            0.10f    /* 4WS common steer: dL error -> all four wheels */
 #define EDGE_MAX           5.0f     /* clamp, deg                         */
-#define EDGE_SPD           2600     /* forward speed while edge/ENTRY runs */
+#define EDGE_SPD           3200     /* forward speed while edge/ENTRY runs */
 #define EDGE_SIGN          (-1.0f)  /* positive servo = right; verified by the FF=0 run: negative command moves the car left */
+#define EDGE_TOE_ENABLE    0u       /* 0 = no front/rear toe, clean 4WS edge */
 #define EDGE_YAW_KP        0.0f     /* front/rear steer deg per deg yaw   */
 #define EDGE_YAW_KD        0.10f    /* per deg/s                          */
 #define EDGE_YAW_MAX       10.0f     /* clamp, deg                         */
@@ -1861,7 +1862,7 @@ int main(void)
                                   EDGE_YAW_KD * (gyro_z_dps() * GYRO_SIGN));
             if (dy >  EDGE_YAW_MAX) dy =  EDGE_YAW_MAX;
             if (dy < -EDGE_YAW_MAX) dy = -EDGE_YAW_MAX;
-            if (EDGE_KP <= 0.0f) dy = 0.0f;   /* pure differential: no toe steering */
+            if ((EDGE_TOE_ENABLE == 0u) || (EDGE_KP <= 0.0f)) dy = 0.0f;   /* clean 4WS: no toe */
             edge_toe_dbg = (s16)(dy * 10.0f);
 
             fr = d + dy;

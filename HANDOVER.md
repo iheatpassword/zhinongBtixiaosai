@@ -131,9 +131,9 @@ CRC8 poly 0x07、初值 0，覆盖前 11 字节；`0xFFFF` 无效，`2000` 为�
 | `SHIFT_TEST_CM` / `SHIFT_BOUNDARY_MM` | 260 / 150 | 蟹行距离/边界停车 |
 | `RIDGE_FF_DEG` / `RIDGE_KP` / `RIDGE_KI` | 7.5 / 0.02 / 0.004 | 蟹行垄侧 PI |
 | `RIDGE_TARGET_MM` | 148 | 垄侧 TOF 目标（含 +37 安装偏置） |
-| `EDGE_SPD` | 2600 | 贴边/ENTRY 前进速度 |
+| `EDGE_SPD` | 3200 | 贴边/ENTRY 前进速度 |
 | 左激光目标 | 动态锁存 | 启动时 dL∈[40,120] 直接锁存；否则等开车后第一次 dL<120 再锁存；之后保持不变（日志 `ET=`） |
-| `EDGE_KP` / `EDGE_SIGN` | **0.0** / −1 | `EDGE_KP=0` = 纯差速直线：共同转角 d 和前后 toe dy 都强制 0，舵机回中；手动摆正。左激光丢帧保持 300 ms。改回 0.10 恢复 4WS |
+| `EDGE_KP` / `EDGE_SIGN` | **0.10** / −1 | 4WS：四轮共同转角，左/右差速保持 yaw；`EDGE_TOE_ENABLE=0`，无前后 toe；左激光丢帧保持 300 ms |
 | `EDGE_YAW_KP` | 0.0（暂时关闭） | 转向航向 |
 | `diff_kp/ki/kd/max` / `diff_ff` | **0 / 0 / 0 / 600 / −55**（2600 纯差速验证值，可 `K` 改） | 差速航向 PID + 固定偏置 |
 | `CMD_TIMEOUT_MS` | 600000 | 无指令看门狗（实际已放宽；IWDG 仍启用） |
