@@ -36,6 +36,8 @@
 /*  configuration                                                          */
 /* ----------------------------------------------------------------------- */
 #define CTRL_MS            20u      /* speed loop period                    */
+#define SAFETY_ENABLE      0u       /* 0 = disable laser/stall safety stops (test only) */
+#define LASER_INVALID_BLOCK_MS 1000u  /* all F/L/R invalid this long -> block key start */
 #define SPD_DEFAULT        150      /* counts per CTRL_MS                   */
 #define SPD_MAX            2000
 
@@ -202,6 +204,10 @@ static s16 edge_toe_dbg;     /* last edge front/rear toe, 0.1 deg        */
 static u16 laser_dl_hold_mm; /* last valid left-laser distance         */
 static u32 laser_dl_hold_ms;
 static u8  laser_dl_hold_ok;
+static u32 laser_invalid_since;   /* all three F/L/R invalid since */
+static u8  laser_invalid_seen;      /* timer started for an all-invalid stretch */
+static u8  laser_block;            /* 1 = all F/L/R invalid long enough to block a start */
+static u32 laser_fault_until;      /* show the laser-fault screen until this ms */
 static float diff_kp = 0.0f, diff_ki = 0.0f, diff_kd = 0.0f, diff_max = 600.0f;
 static float diff_ff = -55.0f;  /* constant left/right offset, counts (proven 2600 pure-diff trim) */
 static float diff_i;
@@ -690,7 +696,18 @@ static void screen(void)
   u8 i, y;
   s32 d01 = run_dist_01mm();
 
-  if (wheel_test_mode != 0u)
+
+  if ((laser_fault_until != 0u) && ((s32)(laser_fault_until - ms_now()) > 0))
+  {
+    OLED_Clear();
+    OLED_ShowString(0, 0, (u8 *)"LASER INVALID");
+    OLED_ShowString(0, 12, (u8 *)"F/L/R NO DATA");
+    OLED_ShowString(0, 24, (u8 *)"CHECK 3 LASERS");
+    OLED_ShowString(0, 36, (u8 *)"POWER CYCLE");
+    OLED_Refresh_Gram();
+    return;
+  }
+if (wheel_test_mode != 0u)
   {
     u8 k;
 
@@ -1202,6 +1219,45 @@ static u8 safety_restart_ok(void)
 #endif
 }
 
+/* Track whether the front/left/right laser channels have all been invalid
+   for a continuous stretch.  A key-triggered start is refused in that case. */
+static void laser_health_tick(void)
+{
+  u8 f = (u8)((((g_laser.flags & 0x01u) != 0u) && (g_laser.dF != 0xFFFFu)) ? 1u : 0u);
+  u8 l = (u8)((((g_laser.flags & 0x02u) != 0u) && (g_laser.dL != 0xFFFFu)) ? 1u : 0u);
+  u8 r = (u8)((((g_laser.flags & 0x04u) != 0u) && (g_laser.dR != 0xFFFFu)) ? 1u : 0u);
+
+  if ((f == 0u) && (l == 0u) && (r == 0u))
+  {
+    if (laser_invalid_seen == 0u)
+    {
+      laser_invalid_seen = 1u;
+      laser_invalid_since = ms_now();
+    }
+    else if ((ms_now() - laser_invalid_since) >= LASER_INVALID_BLOCK_MS)
+    {
+      laser_block = 1u;
+    }
+  }
+  else
+  {
+    laser_invalid_seen = 0u;
+    laser_invalid_since = 0u;
+    laser_block = 0u;
+  }
+}
+
+/* Called before a key-triggered movement; returns 1 and shows the OLED
+   reason/solution when the lasers are still all invalid. */
+static u8 laser_start_blocked(void)
+{
+  if (laser_block == 0u) return 0u;
+
+  laser_fault_until = ms_now() + 5000u;
+  tx_puts(UART5, "LASER INVALID F/L/R\r\n");
+  tx_puts(UART5, "POWER CYCLE\r\n");
+  return 1u;
+}
 /* Left-laser dropout compensation: hold the last valid dL for 300 ms.
    The hardware link is still flaky; this keeps the edge loop running over
    short dropouts instead of punching the steering to 0 every lost frame. */
@@ -1956,6 +2012,8 @@ int main(void)
           Safety_StallUpdate(&g_stall, apwm, (const s16 *)meas_spd, 20u);
         }
 
+        laser_health_tick();
+
         if (fsm2_mode != 0u)
         {
           s16 spd2[4];
@@ -2078,6 +2136,16 @@ int main(void)
     {
       u8 ev = key_event;
       key_event = 0u;
+
+      /* Before any key-triggered movement, refuse to start when the front,
+         left and right laser channels have all been invalid for >= 1 s.
+         The OLED shows the reason and the remedy (power cycle). */
+      if ((laser_block != 0u) && (wheel_test_mode == 0u) &&
+          ((ev == 1u) || (ev == 2u) || (ev == 3u) || (ev == 4u) || (ev == 5u)))
+      {
+        laser_start_blocked();
+        ev = 0u;                   /* consume the event, do not move */
+      }
 
       if (ev == 1u)
       {
