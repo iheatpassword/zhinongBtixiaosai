@@ -59,7 +59,7 @@
 #define EDGE_TARGET_LATCH_MAX_MM 120u /* latch the first dL below this      */
 #define EDGE_KP            0.10f    /* 4WS common steer: dL error -> all four wheels */
 #define EDGE_MAX           5.0f     /* clamp, deg                         */
-#define EDGE_SPD           3200     /* forward speed while edge/ENTRY runs */
+#define EDGE_SPD           2600     /* forward speed while edge/ENTRY runs */
 #define EDGE_SIGN          (-1.0f)  /* positive servo = right; verified by the FF=0 run: negative command moves the car left */
 #define EDGE_TOE_ENABLE    0u       /* 0 = no front/rear toe, clean 4WS edge */
 #define EDGE_YAW_KP        0.0f     /* front/rear steer deg per deg yaw   */
@@ -214,6 +214,7 @@ static u8  cal_mode;
 static s8  cal_dir;
 static s32 cal_counts;
 static u8  fsm2_mode;
+static Fsm2Action last_crab_action;
 static u16 fsm2_dist0;
 static SafetyFilt g_sf;
 static SafetyCrab g_sc;
@@ -1189,12 +1190,16 @@ static void key_tick(void)
 /* A new FSM2 run is allowed only when no safety-stop cause is still active. */
 static u8 safety_restart_ok(void)
 {
+#if (SAFETY_ENABLE == 0u)
+  return 1u;
+#else
   if (g_stall.stalled != 0u) return 0u;
   if (Safety_MinDistanceStop(&g_sf, (u16)(SAFE_STOP_MM + SAFE_RESTART_MARGIN_MM)) != 0u)
   {
     return 0u;
   }
   return 1u;
+#endif
 }
 
 /* Left-laser dropout compensation: hold the last valid dL for 300 ms.
@@ -1312,6 +1317,85 @@ static void shift_start(s16 dir)
   tx_puts(UART5,  "SHIFT START\r\n");
 }
 
+/* Reset the long-press crab controller state.  Used by the standalone W/W-
+   test and by the FSM2 CRAB states (so the FSM2 reuses the same proven
+   ridge-PI + front/rear-differential logic). */
+static void shift_ctrl_reset(s16 dir)
+{
+  shift_dir = dir;
+  shift_yaw_target = 0.0f;
+  shift_df_filt = 0.0f;
+  ridge_integ = 0.0f;
+  shift_yaw_fault_cnt = 0u;
+  shift_ridge_dbg = 0;
+  shift_doff_dbg = 0;
+  shift_af_dbg = 0;
+  shift_base_cm = App_GetDistanceCm();
+  shift_start_ms = ms_now();
+  shift_t0 = ms_now();
+  App_DriveStop();
+  App_SetSteerAll((float)(90 * dir));
+}
+
+/* One control tick of the long-press crab/ridge logic. */
+static void shift_ctrl_step(void)
+{
+  s16 sp[4];
+  float r = gyro_z_dps() * GYRO_SIGN;
+  float a;
+  float doff;
+  float cy, yaw_err;
+
+  doff = RIDGE_FF_DEG;
+  if ((g_laser.ridge_valid != 0u) &&
+      (g_laser.dRidge >= RIDGE_VALID_MIN) && (g_laser.dRidge <= RIDGE_VALID_MAX))
+  {
+    float rerr = (float)g_laser.dRidge - RIDGE_TARGET_MM;
+    if ((rerr > RIDGE_DEADBAND_MM) || (rerr < -RIDGE_DEADBAND_MM))
+    {
+      ridge_integ += RIDGE_KI * rerr * 0.02f;
+    }
+    if (ridge_integ >  RIDGE_I_MAX) ridge_integ =  RIDGE_I_MAX;
+    if (ridge_integ < -RIDGE_I_MAX) ridge_integ = -RIDGE_I_MAX;
+  }
+  else
+  {
+    ridge_integ = 0.0f;
+  }
+  doff += ridge_integ;
+  if (doff >  RIDGE_OFFSET_MAX) doff =  RIDGE_OFFSET_MAX;
+  if (doff < 0.0f) doff = 0.0f;
+  shift_ridge_dbg = (s16)(doff * 10.0f);
+  a = (float)(90 * shift_dir) + doff;
+
+  if ((g_laser.dF != 0xFFFFu) && (g_laser.dF >= 80u) && (g_laser.dF <= 500u))
+  {
+    if (shift_df_filt == 0.0f) shift_df_filt = (float)g_laser.dF;
+    shift_df_filt += SHIFT_DF_FILT_ALPHA * ((float)g_laser.dF - shift_df_filt);
+
+    shift_yaw_target += SHIFT_DF_LOOP_SIGN * SHIFT_DF_KI *
+                        (SHIFT_DF_TARGET_MM - shift_df_filt) * 0.02f;
+    if (shift_yaw_target >  SHIFT_YAW_TARGET_MAX) shift_yaw_target =  SHIFT_YAW_TARGET_MAX;
+    if (shift_yaw_target < -SHIFT_YAW_TARGET_MAX) shift_yaw_target = -SHIFT_YAW_TARGET_MAX;
+  }
+
+  yaw_err = yaw_deg - shift_yaw_target;
+  cy = SHIFT_YAW_SPD_KP * yaw_err + SHIFT_YAW_SPD_KD * r;
+  if (cy >  SHIFT_YAW_SPD_MAX) cy =  SHIFT_YAW_SPD_MAX;
+  if (cy < -SHIFT_YAW_SPD_MAX) cy = -SHIFT_YAW_SPD_MAX;
+  cy *= SHIFT_YAW_SPD_SIGN;
+
+  App_SetSteer4(a, a, a, a);
+
+  shift_doff_dbg = (s16)(shift_yaw_target * 10.0f);
+  shift_af_dbg   = (s16)(yaw_err * 10.0f);
+
+  sp[0] = (s16)(SHIFT_SPD - cy);   /* front-left  */
+  sp[1] = (s16)(SHIFT_SPD - cy);   /* front-right */
+  sp[2] = (s16)(SHIFT_SPD + cy);   /* rear-left   */
+  sp[3] = (s16)(SHIFT_SPD + cy);   /* rear-right  */
+  App_SetWheelSpeed(sp);
+}
 static void tx_hexb(USART_TypeDef *u, u8 v)
 {
   const char *h = "0123456789ABCDEF";
@@ -1558,66 +1642,8 @@ int main(void)
           }
           else if (shift_phase == 1u)
           {
-            s16 sp[4];
-            float r = gyro_z_dps() * GYRO_SIGN;
-            float a;
-            float doff = 0.0f;
-            float cy, yaw_err;
+            shift_ctrl_step();
 
-            /* lateral offset from the aux ridge-side laser (direct measurement) */
-            /* feed-forward mechanical crab angle + slow integral on ridge distance */
-            doff = RIDGE_FF_DEG;
-            if ((g_laser.ridge_valid != 0u) &&
-                (g_laser.dRidge >= RIDGE_VALID_MIN) && (g_laser.dRidge <= RIDGE_VALID_MAX))
-            {
-              float rerr = (float)g_laser.dRidge - RIDGE_TARGET_MM;
-              if ((rerr > RIDGE_DEADBAND_MM) || (rerr < -RIDGE_DEADBAND_MM))
-              {
-                ridge_integ += RIDGE_KI * rerr * 0.02f;
-              }
-              if (ridge_integ >  RIDGE_I_MAX) ridge_integ =  RIDGE_I_MAX;
-              if (ridge_integ < -RIDGE_I_MAX) ridge_integ = -RIDGE_I_MAX;
-            }
-            else
-            {
-              ridge_integ = 0.0f;   /* sensor sees nothing plausible: drop the windup */
-            }
-            doff += ridge_integ;
-            if (doff >  RIDGE_OFFSET_MAX) doff =  RIDGE_OFFSET_MAX;
-            if (doff < 0.0f) doff = 0.0f;
-            shift_ridge_dbg = (s16)(doff * 10.0f);
-            a = (float)(90 * shift_dir) + doff;
-
-            /* outer loop: front-laser distance -> slow heading target so that
-               the car axis stays parallel to the ridge wall                  */
-            if ((g_laser.dF != 0xFFFFu) && (g_laser.dF >= 80u) && (g_laser.dF <= 500u))
-            {
-              if (shift_df_filt == 0.0f) shift_df_filt = (float)g_laser.dF;
-              shift_df_filt += SHIFT_DF_FILT_ALPHA * ((float)g_laser.dF - shift_df_filt);
-
-              shift_yaw_target += SHIFT_DF_LOOP_SIGN * SHIFT_DF_KI *
-                                  (SHIFT_DF_TARGET_MM - shift_df_filt) * 0.02f;
-              if (shift_yaw_target >  SHIFT_YAW_TARGET_MAX) shift_yaw_target =  SHIFT_YAW_TARGET_MAX;
-              if (shift_yaw_target < -SHIFT_YAW_TARGET_MAX) shift_yaw_target = -SHIFT_YAW_TARGET_MAX;
-            }
-
-            /* inner loop: yaw error against the slow target -> front/rear speed differential */
-            yaw_err = yaw_deg - shift_yaw_target;
-            cy = SHIFT_YAW_SPD_KP * yaw_err + SHIFT_YAW_SPD_KD * r;
-            if (cy >  SHIFT_YAW_SPD_MAX) cy =  SHIFT_YAW_SPD_MAX;
-            if (cy < -SHIFT_YAW_SPD_MAX) cy = -SHIFT_YAW_SPD_MAX;
-            cy *= SHIFT_YAW_SPD_SIGN;
-
-            App_SetSteer4(a, a, a, a);
-
-            shift_doff_dbg = (s16)(shift_yaw_target * 10.0f);
-            shift_af_dbg   = (s16)(yaw_err * 10.0f);
-
-            sp[0] = (s16)(SHIFT_SPD - cy);   /* front-left  */
-            sp[1] = (s16)(SHIFT_SPD - cy);   /* front-right */
-            sp[2] = (s16)(SHIFT_SPD + cy);   /* rear-left   */
-            sp[3] = (s16)(SHIFT_SPD + cy);   /* rear-right  */
-            App_SetWheelSpeed(sp);
 
             if ((yaw_deg > 12.0f) || (yaw_deg < -12.0f))
             {
@@ -1817,6 +1843,7 @@ int main(void)
           }
         }
 
+#if (SAFETY_ENABLE != 0u)
         if ((edge_mode != 0u) &&
             ((Safety_MinDistanceStop(&g_sf, SAFE_STOP_MM) != 0u) ||
              (g_stall.stalled != 0u)))
@@ -1825,6 +1852,7 @@ int main(void)
           edge_mode = 0u;
           tx_puts(UART5, "EDGE SAFE STOP\r\n");
         }
+#endif
 
         if (edge_mode != 0u)
         {
@@ -1932,6 +1960,7 @@ int main(void)
         {
           s16 spd2[4];
 
+#if (SAFETY_ENABLE != 0u)
           if ((Safety_MinDistanceStop(&g_sf, SAFE_STOP_MM) != 0u) || (g_stall.stalled != 0u))
           {
             App_DriveStop();
@@ -1940,6 +1969,7 @@ int main(void)
             tx_puts(UART5, "SAFE STOP\r\n");
           }
           else
+#endif
           {
             g_f2in.dF = g_sf.dF; g_f2in.dB = g_sf.dB;
             g_f2in.dL = g_sf.dL; g_f2in.dR = g_sf.dR;
@@ -2008,8 +2038,15 @@ int main(void)
                     App_SetWheelSpeed(spd2);
                   }
                   break;
-                case F2A_CRAB_R: App_SetSteerAll(90.0f);  App_SetWheelSpeed(spd2); break;
-                case F2A_CRAB_L: App_SetSteerAll(-90.0f); App_SetWheelSpeed(spd2); break;
+                case F2A_CRAB_R:
+                case F2A_CRAB_L:
+                  if (last_crab_action != g_f2out.action)
+                  {
+                    shift_ctrl_reset((g_f2out.action == F2A_CRAB_R) ? 1 : -1);
+                    last_crab_action = g_f2out.action;
+                  }
+                  shift_ctrl_step();
+                  break;
                 case F2A_REV:    App_SetSteerAll(0.0f);
                                  spd2[0] = -RUN_SPD; spd2[1] = -RUN_SPD;
                                  spd2[2] = -RUN_SPD; spd2[3] = -RUN_SPD;

@@ -236,6 +236,7 @@ static u8 f2_is_passive(Fsm2State s)
    stall, or any valid laser closer than F2_LASER_MIN_MM.                   */
 static u8 f2_check_safety(const Fsm2Input *in)
 {
+#if (F2_SAFETY_ENABLE != 0u)
   if (in->stall != 0u)
   {
     f2_fault(F2_FAULT_STALL);
@@ -265,8 +266,10 @@ static u8 f2_check_safety(const Fsm2Input *in)
     f2_fault(F2_FAULT_NEAR_R);
     return 1u;
   }
-
+#else
+  (void)in;
   return 0u;
+#endif
 }
 
 static u32 f2_timeout_for(Fsm2State s)
@@ -407,12 +410,13 @@ static void f2_run_crab(const Fsm2Input *in)
     f2_goto(next);
     return;
   }
-
+#if (F2_SAFETY_ENABLE != 0u)
   /* Neither front nor rear lateral reference: stop, do not use the IMU. */
   if (s_lat_ok == 0u)
   {
     f2_fault(F2_FAULT_NO_LATERAL);
   }
+#endif
 }
 
 static void f2_run_rev(const Fsm2Input *in)

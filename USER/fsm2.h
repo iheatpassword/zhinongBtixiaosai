@@ -105,6 +105,7 @@
 #define F2_REV_TIMEOUT_MS        60000u
 
 /* Ӳȫ: һ·ЧСڸֵ ->  FAULT, mm */
+#define F2_SAFETY_ENABLE         0u    /* 0 = disable FSM2 internal safety faults (test only) */
 #define F2_LASER_MIN_MM          30u
 
 /* ںϱֵ: dF ¢ 206 mmdB = ʵ 100 mm + 37 mm ƫ = 137 mm */
