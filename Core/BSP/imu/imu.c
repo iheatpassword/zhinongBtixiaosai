@@ -25,11 +25,23 @@
 #define ICM_REG_GYRO_ZOUT_H   0x37u
 
 #define IMU_BIAS_SAMPLES      200u
-#define IMU_BIAS_PERIOD_MS    3u
+/* GYRO_SMPLRT_DIV=7 puts the gyro output at 1125/8 = 140.6 Hz, i.e. one new
+   sample every 7.1 ms.  Sampling every 3 ms returned the same sample ~2.4 times
+   and cut the averaging to ~84 independent readings; 8 ms gives 200 genuine
+   ones for a bias that is three times tighter. */
+#define IMU_BIAS_PERIOD_MS    8u
 
 static float s_bias;
 static float s_rate_dps;
 static float s_yaw_deg;
+
+/* The bit-banged I2C occasionally returns a corrupted byte.  One bad sample is
+   integrated over a whole 20 ms tick, so a single flipped high bit is worth
+   several degrees of heading and shows up as the car "jumping" while standing
+   still.  Integrate the median of the last three rates instead of the newest
+   one: an isolated glitch can never win the vote. */
+static float s_hist[3];
+static uint8_t s_hist_n, s_hist_i;
 
 static uint8_t configured;
 static uint8_t gyro_z_raw(int16_t *raw)
@@ -90,14 +102,34 @@ void IMU_Init(void)
   s_bias = good ? (float)sum / good : 0.0f;
   s_rate_dps = 0.0f;
   s_yaw_deg  = 0.0f;
+  s_hist[0] = s_hist[1] = s_hist[2] = 0.0f;
+  s_hist_n  = 0u;
+  s_hist_i  = 0u;
 }
 
 uint8_t IMU_Update(float dt_s)
 {
   int16_t raw;
+  float r, m, a, b, c;
+
   if (!configured || !gyro_z_raw(&raw)) { s_rate_dps = 0; return 0; }
-  s_rate_dps = ((float)raw - s_bias) / IMU_LSB_PER_DPS;
-  s_yaw_deg += s_rate_dps * dt_s;
+
+  r = ((float)raw - s_bias) / IMU_LSB_PER_DPS;
+
+  s_hist[s_hist_i] = r;
+  s_hist_i = (uint8_t)((s_hist_i + 1u) % 3u);
+  if (s_hist_n < 3u) s_hist_n++;
+
+  m = r;
+  if (s_hist_n == 3u)
+  {
+    a = s_hist[0]; b = s_hist[1]; c = s_hist[2];
+    m = (a < b) ? ((b < c) ? b : ((a < c) ? c : a))
+                : ((a < c) ? a : ((b < c) ? c : b));
+  }
+
+  s_rate_dps  = m;
+  s_yaw_deg  += m * dt_s;
   return 1;
 }
 
@@ -114,4 +146,9 @@ float IMU_YawDeg(void)
 void IMU_ResetYaw(void)
 {
   s_yaw_deg = 0.0f;
+  /* Drop the spike history too, so a sample taken before the reset cannot
+     become the median seed of the new run. */
+  s_hist[0] = s_hist[1] = s_hist[2] = 0.0f;
+  s_hist_n  = 0u;
+  s_hist_i  = 0u;
 }

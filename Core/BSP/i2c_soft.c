@@ -16,7 +16,10 @@
 #define SDA_L()     HAL_GPIO_WritePin(IIC_PORT, IIC_SDA, GPIO_PIN_RESET)
 #define SDA_READ()  (HAL_GPIO_ReadPin(IIC_PORT, IIC_SDA) == GPIO_PIN_SET)
 
-#define IIC_DELAY() BSP_DelayUs(1)
+/* 2 us per half period -> about 250 kHz.  The ICM-20948 is rated to 400 kHz and
+   the old 1 us ran right at that limit, which is where a jumper-wired module
+   starts returning the occasional corrupted byte. */
+#define IIC_DELAY() BSP_DelayUs(2)
 
 static void sda_out(void)
 {
@@ -25,7 +28,7 @@ static void sda_out(void)
   g.Pin   = IIC_SDA;
   g.Mode  = GPIO_MODE_OUTPUT_PP;
   g.Pull  = GPIO_PULLUP;
-  g.Speed = GPIO_SPEED_FREQ_HIGH;
+  g.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(IIC_PORT, &g);
 }
 
@@ -36,7 +39,7 @@ static void sda_in(void)
   g.Pin   = IIC_SDA;
   g.Mode  = GPIO_MODE_INPUT;
   g.Pull  = GPIO_PULLUP;
-  g.Speed = GPIO_SPEED_FREQ_HIGH;
+  g.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(IIC_PORT, &g);
 }
 

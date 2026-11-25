@@ -5,11 +5,18 @@
 EntryWallCommand EntryWall_Update(EntryWall *wall, const AppInputs *in, u16 travel_cm)
 {
   EntryWallCommand cmd = {0};
-  int visible = in->vL && in->dL < ENTRY_WALL_LIMIT_MM;
+  /* Two thresholds: nothing but a genuine rail may start the follow (the rail
+     always reads under 100 mm when first met), but once locked a wider return
+     must not drop the creep and brake the car. */
+  u16 limit = wall->acquired ? ENTRY_WALL_TRACK_MM : ENTRY_WALL_ACQUIRE_MM;
+  int visible = in->vL && in->dL < limit;
   if (!visible) {
     wall->near_samples = 0;
     wall->centered_samples = 0;
-    if (!wall->acquired && in->dL != BSP_DIST_INVALID && travel_cm < ENTRY_SEARCH_LIMIT_CM)
+    /* The start box has no left fence, so "no left return" is normal there and
+       must not veto the creep. Keep searching up to ENTRY_SEARCH_LIMIT_CM; past
+       that the caller stops the car and raises F2_MISSING_RANGE. */
+    if (!wall->acquired && travel_cm < ENTRY_SEARCH_LIMIT_CM)
       cmd.speed = ROUTE_CREEP_COUNTS;
     return cmd;
   }

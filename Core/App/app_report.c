@@ -169,6 +169,33 @@ void Report_Log(void)
 /* ----------------------------------------------------------------------- */
 /*  5 Hz OLED                                                              */
 /* ----------------------------------------------------------------------- */
+
+/* Signed value in tenths, printed with an explicit decimal point ("-3.0").
+   OLED_ShowNumber() takes a u32 and blanks the leading zeros, so the sign and
+   the point are drawn by hand.  A bare integer here was easy to misread as
+   whole degrees. */
+static void show_signed_tenths(u8 x, u8 y, int v10, u8 size)
+{
+  u8  cw  = (u8)(size / 2u);
+  u8  neg = (u8)(v10 < 0);
+  u32 mag = (neg != 0u) ? (u32)(-v10) : (u32)v10;
+  u32 ip  = mag / 10u;
+  u8  fd  = (u8)(mag % 10u);
+  u8  d   = 1u;
+  u32 lim = 10u;
+  u8  col = 0u;
+
+  while ((ip >= lim) && (d < 4u)) { lim *= 10u; d++; }
+
+  if (neg != 0u) { OLED_ShowChar(x, y, (u8)'-', size, 1); col = 1u; }
+
+  OLED_ShowNumber((u8)(x + (u8)(col * cw)), y, ip, d, size);
+  col = (u8)(col + d);
+  OLED_ShowChar((u8)(x + (u8)(col * cw)), y, (u8)'.', size, 1);
+  col++;
+  OLED_ShowChar((u8)(x + (u8)(col * cw)), y, (u8)('0' + (char)fd), size, 1);
+}
+
 void Report_Ui(void)
 {
   AppInputs sample;
@@ -223,7 +250,15 @@ void Report_Ui(void)
   }
 
   OLED_ShowString(0, 36, (const u8 *)"YAW");
-  OLED_ShowNumber(28, 36, (u32)((int)(in->yaw_deg * 10.0f) < 0 ? 0 : (int)(in->yaw_deg * 10.0f)), 4, 12);
+  {
+    /* Tenths of a degree, wrapped into (-180, 180] so the field never needs
+       more digits than it has.  The old code clamped a negative heading to 0,
+       which hid every left-hand turn. */
+    int y10 = (int)(in->yaw_deg * 10.0f) % 3600;
+    if (y10 >  1800) y10 -= 3600;
+    if (y10 < -1800) y10 += 3600;
+    show_signed_tenths(28, 36, y10, 12u);
+  }
 
   OLED_ShowString(0, 48, (const u8 *)"F2");
   OLED_ShowNumber(24, 48, (u32)Fsm2_GetState(), 2, 12);

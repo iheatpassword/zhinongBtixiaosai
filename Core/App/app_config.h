@@ -30,7 +30,8 @@
 
 /* Forward entry along the left wall (A entry and the E test). */
 #define ENTRY_CRUISE_COUNTS     1200  /* counts/20 ms after centering */
-#define ENTRY_WALL_LIMIT_MM      300u /* nearer returns may be the rail */
+#define ENTRY_WALL_ACQUIRE_MM    120u /* rail always reads <100 mm when first met */
+#define ENTRY_WALL_TRACK_MM      300u /* once locked, a lost sample must not brake */
 #define ENTRY_SEARCH_LIMIT_CM    100u /* startup opening */
 #define ENTRY_WALL_BAND_MM        10  /* either side of SIDE_CENTER_MM */
 #define ENTRY_WALL_KP           0.30f /* wheel angle in degrees/mm */
