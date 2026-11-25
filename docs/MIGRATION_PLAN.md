@@ -297,11 +297,14 @@ DMA/UART 中断优先级 = 5，正好等于 `configLIBRARY_MAX_SYSCALL_INTERRUPT
 ## 8. 自检命令
 
 ```powershell
-cd C30D_CubeMX
+cd C30D_CubeMX_Route
 cmake --preset Debug
 cmake --build --preset Debug      # 期望 0 error
 ```
-当前占用：**FLASH 45,376 B / RAM 32,184 B**（HAL + FreeRTOS + 6 任务栈）。
+当前占用（2026-11-25，`cc91f5d`）：**FLASH 74,180 B / 512 KB（14.15%）、RAM 34,456 B / 128 KB（26.29%）**。
+
+工具链来源、PATH 拼法、ST-Link 与 DAPLink(OpenOCD) 烧录命令、故障对照见
+[BUILD_AND_FLASH.md](BUILD_AND_FLASH.md)。
 
 建议在 `.ioc` 的 FreeRTOS 参数里打开 "Check for stack overflow"（`configCHECK_FOR_STACK_OVERFLOW 2`）；
 `vApplicationStackOverflowHook` 已在 `app_tasks.c` 实现，打开即可生效。
