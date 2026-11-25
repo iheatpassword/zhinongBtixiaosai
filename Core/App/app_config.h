@@ -33,7 +33,8 @@
 #define ENTRY_WALL_ACQUIRE_MM    120u /* rail always reads <100 mm when first met */
 #define ENTRY_WALL_TRACK_MM      300u /* once locked, a lost sample must not brake */
 #define ENTRY_SEARCH_LIMIT_CM    100u /* startup opening */
-#define ENTRY_WALL_BAND_MM        10  /* either side of SIDE_CENTER_MM */
+#define ENTRY_WALL_BAND_MM        15  /* either side of SIDE_CENTER_MM */
+#define ENTRY_WALL_HYST_VOTES      8u /* consecutive off-band samples before cruise->creep */
 #define ENTRY_WALL_KP           0.30f /* wheel angle in degrees/mm */
 #define ENTRY_WALL_MAX_DEG      15.0f
 
@@ -45,7 +46,8 @@
 #define DIFF_FF            (-55.0f) /* proven 2600 pure-diff trim, counts */
 
 /* ---- crab / ridge shift ----------------------------------------------- */
-#define SHIFT_SPD          2400
+#define SHIFT_SPD          2600
+#define REV_SPD             900     /* reverse ridge-change cruise, counts/20 ms */
 #define SHIFT_YAW_SPD_KP   40.0f
 #define SHIFT_YAW_SPD_KD   8.0f
 #define SHIFT_YAW_SPD_MAX  150.0f

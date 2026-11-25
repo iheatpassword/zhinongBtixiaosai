@@ -133,6 +133,10 @@ void Fsm2_Tick(const AppInputs *in, u16 odom, Fsm2Output *out)
                  confirmed(d>=240u,in->sample_seq[inner],cm)) {
         saw_exit=1; edge_cm=first_match_cm;
       }
+      /* Creep until the near plate is confirmed, then finish the ridge change
+         at REV_SPD: the exit edge is found from odometry, so it does not need
+         the creep speed once the plate is behind us. */
+      out->slow = (saw_plate == 0u);
       complete=saw_exit && cm>=edge_cm+EDGE_TO_CENTER_CM;
     }
   }

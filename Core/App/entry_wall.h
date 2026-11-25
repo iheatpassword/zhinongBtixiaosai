@@ -6,6 +6,8 @@
 /* Zero-initialize on every new run. All counters count distinct left samples. */
 typedef struct {
   u8 acquired, near_samples, centered_samples, last_seq;
+  u8 cruising;      /* 1 = running at ENTRY_CRUISE_COUNTS (latched) */
+  u8 off_samples;   /* consecutive off-band samples, cruise->creep hysteresis */
 } EntryWall;
 
 typedef struct {

@@ -483,7 +483,7 @@ void AppControl_Tick(const AppInputs *in, AppOutputs *out)
         longitudinal(in,s_f2out.slow ? ROUTE_CREEP_COUNTS : s_f2out.forward_speed,
                      s_f2out.steer_deg);
       } else if (s_f2out.action==F2A_REV) {
-        s16 speed=s_f2out.slow ? ROUTE_CREEP_COUNTS : EDGE_SPD;
+        s16 speed=s_f2out.slow ? ROUTE_CREEP_COUNTS : REV_SPD;
         longitudinal(in,-speed,reverse_wall_angle(in,s_f2out.wall_left));
       } else {
         crab_step(in,s_f2out.action==F2A_CRAB_R ? 1 : -1,
