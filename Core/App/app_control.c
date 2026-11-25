@@ -15,6 +15,7 @@
 #include "app_tasks.h"
 
 #include "fsm2.h"
+#include "entry_wall.h"
 #include "safety.h"
 
 #include "board.h"
@@ -50,6 +51,8 @@ static float s_diff_i;
 
 static u16 s_test_origin;
 static u32 s_test_ms;
+static EntryWall s_test_wall;
+static u32 s_test_wall_last_ok;
 static s16 s_crab_dir;
 static Fsm2Output s_f2out;
 
@@ -111,20 +114,26 @@ static void all_zero(void)
   drive_zero();
 }
 
-/* Positive servo angle points right. For reverse travel the wall steering
-   term changes sign, while the yaw moment stays in body coordinates. */
-static void longitudinal(const AppInputs *in, int left_wall, s16 speed)
+static float reverse_wall_angle(const AppInputs *in, int left_wall)
 {
-  int dir=speed<0 ? -1 : 1;
   u16 d=left_wall ? in->dL : in->dR;
   float angle=0;
   if (d<300u) {
     float error=(float)d-SIDE_CENTER_MM;
-    angle=(left_wall ? -1.0f : 1.0f)*dir*EDGE_KP*error;
+    angle=(left_wall ? 1.0f : -1.0f)*EDGE_KP*error;
   }
   if (angle>EDGE_MAX) angle=EDGE_MAX;
   if (angle<-EDGE_MAX) angle=-EDGE_MAX;
-  float corr=dir*DIFF_FF + YAW_DRIVE_KP*in->yaw_deg + YAW_DRIVE_KD*in->yaw_rate_dps;
+  return angle;
+}
+
+static void longitudinal(const AppInputs *in, s16 speed, float angle)
+{
+  int dir=speed<0 ? -1 : 1;
+  /* Forward feed-forward was measured at EDGE_SPD. Keep its wheel-speed
+     ratio at the slower entry speeds; reverse retains its existing trim. */
+  float feedforward=speed>0 ? DIFF_FF*(float)speed/EDGE_SPD : -DIFF_FF;
+  float corr=feedforward + YAW_DRIVE_KP*in->yaw_deg + YAW_DRIVE_KD*in->yaw_rate_dps;
   corr=clamp_s16f(corr,-150,150);
   set_steer_all(angle);
   s_tgt[0]=s_tgt[2]=speed+(s16)corr;
@@ -340,6 +349,8 @@ static void handle_cmd(AppCmd c, const AppInputs *in)
 
     case APP_CMD_EDGE:
       s_mode = APP_MODE_EDGE;
+      s_test_wall=(EntryWall){0};
+      s_test_wall_last_ok=in->ms;
       s_test_origin=App_GetDistanceCm();
       s_test_ms=in->ms;
       s_diff_i  = 0.0f;
@@ -468,9 +479,12 @@ void AppControl_Tick(const AppInputs *in, AppOutputs *out)
       if (s_f2out.hold || s_f2out.action==F2A_STOP) {
         all_zero();
         set_steer_all(s_f2out.steer_deg);
-      } else if (s_f2out.action==F2A_FWD || s_f2out.action==F2A_REV) {
+      } else if (s_f2out.action==F2A_FWD) {
+        longitudinal(in,s_f2out.slow ? ROUTE_CREEP_COUNTS : s_f2out.forward_speed,
+                     s_f2out.steer_deg);
+      } else if (s_f2out.action==F2A_REV) {
         s16 speed=s_f2out.slow ? ROUTE_CREEP_COUNTS : EDGE_SPD;
-        longitudinal(in,s_f2out.wall_left,s_f2out.action==F2A_REV ? -speed : speed);
+        longitudinal(in,-speed,reverse_wall_angle(in,s_f2out.wall_left));
       } else {
         crab_step(in,s_f2out.action==F2A_CRAB_R ? 1 : -1,
                   s_f2out.slow ? ROUTE_CREEP_COUNTS : SHIFT_SPD,s_f2out.track_ridge);
@@ -486,12 +500,22 @@ void AppControl_Tick(const AppInputs *in, AppOutputs *out)
       u16 stop=edge ? ENTRY_STOP_MM : SIDE_CENTER_MM;
       u16 cm=(u16)(App_GetDistanceCm()-s_test_origin);
       if (!in->laser_fresh || !in->imu_ok || d==BSP_DIST_INVALID ||
-          (edge && !in->vL) || d<=stop || cm>(edge ? 490u : CRAB_TRAVEL_CM+20u) ||
+          d<=stop || cm>(edge ? 490u : CRAB_TRAVEL_CM+20u) ||
           in->ms-s_test_ms>60000u) {
         s_mode=APP_MODE_IDLE; all_zero(); App_SetServoCenter();
       } else if (in->ms-s_test_ms<ROUTE_SETTLE_MS) {
         all_zero(); set_steer_all(edge ? 0 : 90*s_crab_dir);
-      } else if (edge) longitudinal(in,1,d<stop+200u ? ROUTE_CREEP_COUNTS : EDGE_SPD);
+        s_test_wall_last_ok=in->ms;
+      } else if (edge) {
+        EntryWallCommand wall=EntryWall_Update(&s_test_wall,in,cm);
+        if (!wall.speed) {
+          all_zero(); set_steer_all(0);
+          if (in->ms-s_test_wall_last_ok>=400u) s_mode=APP_MODE_IDLE;
+        } else {
+          s_test_wall_last_ok=in->ms;
+          longitudinal(in,d<stop+200u ? ROUTE_CREEP_COUNTS : wall.speed,wall.angle);
+        }
+      }
       else crab_step(in,s_crab_dir,d<stop+200u ? ROUTE_CREEP_COUNTS : SHIFT_SPD,1);
       break;
     }

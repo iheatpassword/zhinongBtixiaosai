@@ -147,9 +147,12 @@ static void ctrl_task(void *arg)
   for (;;)
   {
     sample_inputs(&in);
+    Servo_ReadFeedback(in.steer_feedback10);
     AppControl_Tick(&in, &out);
-    publish_inputs(&in);
     apply_outputs(&out);
+    for (u8 w=0; w<4; ++w) in.steer_target10[w]=out.steer_deg10[w];
+    Servo_QueryNext();
+    publish_inputs(&in);
 
     g_ctl_ticks++;
     vTaskDelayUntil(&last, pdMS_TO_TICKS(CTRL_PERIOD_MS));

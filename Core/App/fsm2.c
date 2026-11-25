@@ -1,11 +1,13 @@
 /* Competition route. Odom is travel magnitude; each state has its own origin. */
 #include "fsm2.h"
+#include "entry_wall.h"
 #include "app_config.h"
 #include "laser_wire.h"
 #include "bsp_types.h"
 
 static Fsm2State state;
 static Fsm2Fault fault;
+static EntryWall entry_wall;
 static u32 start_ms, missing_ms;
 static u16 origin, edge_cm, first_match_cm;
 static u8 entered, missing, votes, previous_seq, have_seq, saw_plate, saw_exit;
@@ -21,6 +23,7 @@ void Fsm2_Start(void)
 {
   if (state!=F2_IDLE && state!=F2_DONE && state!=F2_FAULT) return;
   state=F2_ENTRY; fault=F2_OK; entered=0;
+  entry_wall=(EntryWall){0};
 }
 void Fsm2_Fail(Fsm2Fault reason)
 {
@@ -93,8 +96,13 @@ void Fsm2_Tick(const AppInputs *in, u16 odom, Fsm2Output *out)
     int sum_error=(int)in->dF+in->dB-(int)(ENTRY_STOP_MM+REAR_TARGET_MM);
     int disagreement=front_ref && back_ref &&
         (sum_error<-(int)RIDGE_SUM_TOL_MM || sum_error>(int)RIDGE_SUM_TOL_MM);
+    if (entry) {
+      EntryWallCommand wall=EntryWall_Update(&entry_wall,in,cm);
+      out->forward_speed=wall.speed;
+      out->steer_deg=wall.angle;
+    }
     if (cm>max_cm || (d<=target && cm<min_cm)) Fsm2_Fail(F2_BAD_LANDMARK);
-    else if (d==BSP_DIST_INVALID || (entry && !in->vL && (in->dL==BSP_DIST_INVALID || cm>=100u)) ||
+    else if (d==BSP_DIST_INVALID || (entry && !out->forward_speed) ||
              (out->track_ridge && ((!front_ref && !back_ref) || disagreement))) wait_sensor(in,out);
     else {
       missing=0;

@@ -17,6 +17,7 @@
 #include "main.h"
 #include "usart.h"
 #include "oled/oled.h"
+#include "servo/servo.h"
 
 #define TX_TIMEOUT_MS  20u
 
@@ -62,6 +63,15 @@ void App_PutInt(int v)
 /* ----------------------------------------------------------------------- */
 /*  1 Hz telemetry                                                         */
 /* ----------------------------------------------------------------------- */
+static void log_angles(const s16 angle10[4])
+{
+  for (unsigned w=0; w<4; ++w) {
+    if (w) App_Puts("/");
+    if (angle10[w]==SERVO_ANGLE_NA) App_Puts("NA");
+    else App_PutInt(angle10[w]);
+  }
+}
+
 void Report_Log(void)
 {
   AppInputs sample;
@@ -148,6 +158,11 @@ void Report_Log(void)
   App_Puts(" DIST=");
   App_PutInt((int)App_GetDistanceCm());
 
+  App_Puts("\r\n");
+  App_Puts("STEER TGT10=");
+  log_angles(in->steer_target10);
+  App_Puts(" ACT10=");
+  log_angles(in->steer_feedback10);
   App_Puts("\r\n");
 }
 

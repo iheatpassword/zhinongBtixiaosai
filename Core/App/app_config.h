@@ -28,6 +28,14 @@
 #define EDGE_KP            0.10f    /* deg per mm                         */
 #define EDGE_MAX           5.0f     /* steering clamp, deg                */
 
+/* Forward entry along the left wall (A entry and the E test). */
+#define ENTRY_CRUISE_COUNTS     1200  /* counts/20 ms after centering */
+#define ENTRY_WALL_LIMIT_MM      300u /* nearer returns may be the rail */
+#define ENTRY_SEARCH_LIMIT_CM    100u /* startup opening */
+#define ENTRY_WALL_BAND_MM        10  /* either side of SIDE_CENTER_MM */
+#define ENTRY_WALL_KP           0.30f /* wheel angle in degrees/mm */
+#define ENTRY_WALL_MAX_DEG      15.0f
+
 /* ---- differential heading trim (left/right speed split) --------------- */
 #define DIFF_KP            0.0f
 #define DIFF_KI            0.0f

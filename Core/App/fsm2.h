@@ -12,7 +12,8 @@ typedef enum {F2_OK,F2_LOST_LINK,F2_LOST_IMU,F2_MISSING_RANGE,F2_BAD_LANDMARK,
               F2_TIMEOUT,F2_ABORTED,F2_OBSTRUCTION,F2_STALLED} Fsm2Fault;
 typedef struct {
   Fsm2Action action;
-  s16 steer_deg;
+  float steer_deg;
+  s16 forward_speed;
   u8 slow, hold, track_ridge, wall_left;
 } Fsm2Output;
 void Fsm2_Init(void);

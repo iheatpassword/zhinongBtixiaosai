@@ -26,6 +26,7 @@ typedef struct AppInputs
   u8  sample_seq[4];
   u8  imu_ok;
   s16 wheel_cnt[4];           /* signed counts this period, FL FR RL RR */
+  s16 steer_target10[4], steer_feedback10[4]; /* FL FR RL RR, tenths of a degree */
   float yaw_deg;
   float yaw_rate_dps;
   u16 batt_adc;

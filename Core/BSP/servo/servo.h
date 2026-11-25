@@ -22,11 +22,16 @@
    so lower it to 40..60 ms once the loops are re-tuned. */
 #define SERVO_FAST_MS       150u
 #define SERVO_SLOW_MS       300u
+#define SERVO_ANGLE_NA      INT16_MIN   /* outside the physical range */
 
 void Servo_Init(void);
 void Servo_Center(void);
 void Servo_SetAllDeg(int deg);                          /* broadcast */
 void Servo_SetOneDeg(uint8_t id, float deg);
 void Servo_Set4Deg(float fl, float fr, float rl, float rr);
+/* Control task: finish previous read before steering TX, query after steering TX. */
+void Servo_ReadFeedback(s16 angle10[4]);
+void Servo_QueryNext(void);
+void Servo_RxIRQ(void);
 
 #endif /* SERVO_H */
