@@ -58,7 +58,13 @@
 /* ======================================================================= */
 /*  现场可调参数 (改完重新编译即可, 不需要动逻辑)                          */
 /* ======================================================================= */
-#define SAFE_STOP_MM        30      /* 任一路"有效"距离 < 该值 -> 立即停车, mm   */
+/* 任一路"有效"距离 < 该值 -> 立即停车, mm.
+   The aisle is 400 mm and the car 300 mm, so the two side readings always sum
+   to ~100 mm: holding dL = 65 leaves dR = 35, only 5 mm above the old 30 mm
+   trip.  Every small wobble to the right parked the car, which is why the
+   entry kept ending a few hundred millimetres in.  15 mm keeps a real guard
+   against driving into a wall without fighting the tracking. */
+#define SAFE_STOP_MM        15
 #include "app_config.h"
 #define TARGET_F_MM         ENTRY_STOP_MM     /* 前激光到垄的目标值, mm (+6 偏置已并入)    */
 #define TARGET_B_MM         REAR_TARGET_MM     /* 垄侧 TOF 目标值, mm (真实 100 + 37 偏置)  */

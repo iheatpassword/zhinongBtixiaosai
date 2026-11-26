@@ -9,13 +9,18 @@ typedef enum {
 } Fsm2State;
 typedef enum {F2A_STOP,F2A_FWD,F2A_REV,F2A_CRAB_R,F2A_CRAB_L} Fsm2Action;
 typedef enum {F2_OK,F2_LOST_LINK,F2_LOST_IMU,F2_MISSING_RANGE,F2_BAD_LANDMARK,
-              F2_TIMEOUT,F2_ABORTED,F2_OBSTRUCTION,F2_STALLED} Fsm2Fault;
+              F2_TIMEOUT,F2_ABORTED,F2_OBSTRUCTION,F2_STALLED,F2_TURN_TIMEOUT} Fsm2Fault;
 typedef struct {
   Fsm2Action action;
   float steer_deg;
-  s16 forward_speed;
-  u8 slow, hold, track_ridge, wall_left;
+  float steer_trim_deg;   /* front +trim, rear -trim: rotates the body */
+  s16 forward_speed, speed_limit;
+  u8 hold, track_ridge, wall_left;
 } Fsm2Output;
+enum { F2W_ENDPOINT=1, F2W_ENTRY_WALL=2, F2W_NO_RIDGE=4, F2W_RIDGE_SUM=8,
+       F2W_PARK_ALIGN=16, F2W_OUTER_WALL=32, F2W_INNER_RANGE=64 };
+u8 Fsm2_TraceWait(void);
+u8 Fsm2_TraceFlags(void);
 void Fsm2_Init(void);
 void Fsm2_Start(void);
 void Fsm2_Abort(void);

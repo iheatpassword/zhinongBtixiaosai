@@ -8,6 +8,8 @@
 
 #include "bsp_types.h"
 
+void Report_Init(void);
+void Report_Heading(void);
 void Report_Log(void);          /* 1 Hz, log task, may block */
 void Report_Ui(void);           /* 5 Hz, ui task            */
 

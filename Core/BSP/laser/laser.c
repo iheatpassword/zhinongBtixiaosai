@@ -9,13 +9,13 @@
 static u8 dma_buf[RX_SIZE], frame[LW_LEN];
 static u16 cursor;
 static u8 used;
-static LaserData latest;
+static LaserData latest[2];  /* independent frame clocks, head then tail */
 
 /* Publish only whole CRC-checked frames. The control task can preempt polling. */
 static void parse(u8 byte)
 {
   frame[used++] = byte;
-  while (used && (frame[0] != LW_SYNC0 || (used >= 2 && frame[1] != LW_SYNC1))) {
+  while (used && (frame[0] != LW_SYNC0 || (used >= 2 && frame[1] != LW_SYNC1 && frame[1] != LW_REAR_SYNC1))) {
     --used;
     memmove(frame, frame+1, used);
   }
@@ -36,17 +36,14 @@ static void parse(u8 byte)
   data.valid = 1;
   data.last_ms = BSP_Ms();
   taskENTER_CRITICAL();
-  latest = data;
+  latest[frame[1] == LW_REAR_SYNC1] = data;
   taskEXIT_CRITICAL();
   used = 0;
 }
 
-void Laser_Snapshot(LaserData *data)
+static void expire_channels(LaserData *data, u32 now)
 {
-  taskENTER_CRITICAL();
-  *data = latest;
-  taskEXIT_CRITICAL();
-  u32 lag = BSP_Ms() - data->last_ms;
+  u32 lag = now - data->last_ms;
   data->valid = data->valid && lag <= LW_MAX_AGE_MS;
   u16 *mm[] = {&data->dL,&data->dR,&data->dF,&data->dRidge};
   for (unsigned i=0; i<LW_CHANNELS; ++i) {
@@ -57,6 +54,17 @@ void Laser_Snapshot(LaserData *data)
     }
   }
   data->ridge_valid = (data->flags & lw_channel_bit(LW_BACK)) != 0;
+}
+
+void Laser_Snapshot(LaserData *head, LaserData *tail)
+{
+  taskENTER_CRITICAL();
+  *head = latest[0];
+  *tail = latest[1];
+  u32 now = BSP_Ms();
+  taskEXIT_CRITICAL();
+  expire_channels(head, now);
+  expire_channels(tail, now);
 }
 
 void Laser_Init(void)
@@ -74,7 +82,7 @@ void Laser_Poll(void)
     (void)HAL_UART_AbortReceive(&huart4);
     __HAL_UART_CLEAR_OREFLAG(&huart4);
     taskENTER_CRITICAL();
-    latest.valid = 0;
+    latest[0].valid = latest[1].valid = 0;
     taskEXIT_CRITICAL();
     Laser_Init();
     last_poll = now;

@@ -2,7 +2,10 @@
   * @file    app_tasks.c
   * @brief   FreeRTOS task set, native API, static allocation.
   */
+#include "tune_params.h"
 #include "app_tasks.h"
+#include "app_config.h"
+#include <stdlib.h>
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -20,13 +23,14 @@
 #include "app_if.h"
 #include "app_cmd.h"
 #include "app_report.h"
+#include "motion_trace.h"
 
 #define CTRL_PERIOD_MS      20u
 #define LASER_PERIOD_MS      5u
 #define CMD_PERIOD_MS       10u
 #define MON_PERIOD_MS      100u
 #define UI_PERIOD_MS       200u
-#define LOG_PERIOD_MS     1000u
+#define LOG_PERIOD_MS      100u
 
 #define PRIO_CTRL           30
 #define PRIO_LASER          28
@@ -37,12 +41,16 @@
 
 #define STK_CTRL           384
 #define STK_LASER          256
-#define STK_CMD            384
+#define STK_CMD            640
 #define STK_MON            192
 #define STK_UI             320
-#define STK_LOG            320
+#define STK_LOG            512
 
-#define MON_STALL_WINDOWS    3u
+/* Windows the monitor waits before it stops feeding the watchdog.  3 (300 ms)
+   was short enough that one long UART or I2C hiccup reset the board mid-run;
+   10 (1 s) still catches a dead control task well inside a tenth of a second
+   of wheel travel at creep. */
+#define MON_STALL_WINDOWS    10u
 
 static StackType_t  s_stk_ctrl[STK_CTRL];   static StaticTask_t s_tcb_ctrl;
 static StackType_t  s_stk_laser[STK_LASER]; static StaticTask_t s_tcb_laser;
@@ -75,8 +83,14 @@ static void sample_inputs(AppInputs *in)
   float dt;
   u8    w;
 
-  LaserData laser;
-  Laser_Snapshot(&laser);
+  LaserData laser, tail;
+  Laser_Snapshot(&laser, &tail);
+  in->tail_left = tail.dL;
+  in->tail_right = tail.dR;
+  in->tail_back = tail.dRidge;
+  in->tail_fresh = tail.valid;
+  in->tail_flags = tail.flags;
+  in->use_tail = 0;
   in->dF = laser.dF; in->dL = laser.dL;
   in->dR = laser.dR; in->dB = laser.dRidge;
   in->vF = in->dF < BSP_DIST_OVERRANGE;
@@ -85,7 +99,17 @@ static void sample_inputs(AppInputs *in)
   in->vB = in->dB < BSP_DIST_OVERRANGE;
   in->laser_fresh = laser.valid;
   in->laser_flags = laser.flags;
-  for (w=0; w<4; w++) in->sample_seq[w] = laser.sample_seq[w];
+  u32 frame_age=BSP_Ms()-laser.last_ms;
+  u32 tail_lag = BSP_Ms() - tail.last_ms;
+  for (w=0; w<2; w++) {
+    u32 age = tail_lag + tail.sample_age[w];
+    in->tail_age[w] = tail.valid && age < 255u ? (u8)age : 255u;
+  }
+  for (w=0; w<4; w++) {
+    in->sample_seq[w] = laser.sample_seq[w];
+    u32 age = frame_age + laser.sample_age[w];
+    in->range_age[w] = age < 255u ? (u8)age : 255u;
+  }
 
   for (w = 0u; w < 4u; w++)
   {
@@ -100,6 +124,10 @@ static void sample_inputs(AppInputs *in)
   if (dt > 0.100f) dt = 0.100f;
   s_prev_ms = now;
 
+  in->sample_dt_s=dt;
+  unsigned counts=0;
+  for (w=0; w<4; ++w) counts+=abs(in->wheel_cnt[w]);
+  in->wheel_speed_mm_s=counts*(3.14159265f*WHEEL_DIAMETER_MM/(4*ENCODER_CPR))/dt;
   in->imu_ok = IMU_Update(dt);
 
   in->yaw_deg      = IMU_YawDeg();
@@ -148,9 +176,12 @@ static void ctrl_task(void *arg)
   {
     sample_inputs(&in);
     Servo_ReadFeedback(in.steer_feedback10);
+    for (u8 w=0; w<4; ++w) in.steer_sample_ms[w]=Servo_FeedbackTime(w);
     AppControl_Tick(&in, &out);
     apply_outputs(&out);
+    in.heading=out.heading;
     for (u8 w=0; w<4; ++w) in.steer_target10[w]=out.steer_deg10[w];
+    MotionTrace_Capture(&in, &out);
     Servo_QueryNext();
     publish_inputs(&in);
 
@@ -204,7 +235,11 @@ static void log_task(void *arg)
   (void)arg;
   for (;;)
   {
-    Report_Log();
+    static unsigned phase;
+    MotionTrace_Report();
+    Report_Heading();
+    if (phase == 0u) Report_Log();
+    phase = (phase + 1u) % 10u;
     vTaskDelayUntil(&last, pdMS_TO_TICKS(LOG_PERIOD_MS));
   }
 }
@@ -266,6 +301,9 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 
 void App_InitRtos(void)
 {
+  Tune_Init();
+  Report_Init();
+  MotionTrace_Init();
   AppControl_Init();
   AppCmd_Init();
 

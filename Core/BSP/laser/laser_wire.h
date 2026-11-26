@@ -8,7 +8,7 @@
  * 2000 is an observed no-echo on VB02A; 0xffff denotes missing data.
  */
 enum { LW_LEFT, LW_RIGHT, LW_FRONT, LW_BACK, LW_CHANNELS };
-enum { LW_SYNC0=0xaa, LW_SYNC1=0x57, LW_MM=2, LW_FLAGS=10, LW_SEQ=11,
+enum { LW_SYNC0=0xaa, LW_SYNC1=0x57, LW_REAR_SYNC1=0x58, LW_MM=2, LW_FLAGS=10, LW_SEQ=11,
        LW_AGE=15, LW_CRC=19, LW_LEN=20, LW_MAX_AGE_MS=100, LW_MISSING=0xffff };
 static inline uint8_t lw_channel_bit(unsigned i)
 {

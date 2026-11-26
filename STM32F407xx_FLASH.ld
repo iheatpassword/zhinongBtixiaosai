@@ -57,7 +57,10 @@ MEMORY
 {
 RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 128K
 CCMRAM (xrw)      : ORIGIN = 0x10000000, LENGTH = 64K
-FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 512K
+/* 384K of the 512 KB part: sector 7 (0x08060000) holds the saved tuning table,
+   and stopping the image here makes it impossible for the linker to place code
+   on top of that record. */
+FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 384K
 }
 
 /* Highest address of the user mode stack */

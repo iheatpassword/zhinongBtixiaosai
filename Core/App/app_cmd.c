@@ -13,6 +13,7 @@
   *      C            all servos centred
   *      H / ?        help
   */
+#include "tune_params.h"
 #include "app_cmd.h"
 #include "app_config.h"
 #include "app_if.h"
@@ -29,6 +30,7 @@ typedef struct
   u8   buf[CMD_BUF_SIZE];
   u16  last;
   char line[CMD_LINE_MAX];
+  u8   discard;
   u8   len;
   u8   id;
 } CmdPort;
@@ -61,6 +63,7 @@ static void cmd_help(void)
   App_Puts("E     4WS edge-follow test\r\n");
   App_Puts("W/W-  crab right / left\r\n");
   App_Puts("T/T-  servos +90 / -90,  C centre\r\n");
+  App_Puts("P LIST | P GET key | P SET key value | P RESET\r\n");
   App_Puts("H/?   help\r\n");
   App_Puts("================\r\n");
 }
@@ -83,6 +86,7 @@ static void cmd_exec(char *line)
   }
 
   if (i == 0u) return;
+  if (line[0] == 'P' && (line[1] == ' ' || !line[1])) { Tune_Command(line); return; }
 
   /* Shape check: one command letter, then only digits / '-' / spaces.
      A binary frame from a sensor wired to a command port is full of printable
@@ -122,6 +126,17 @@ static void cmd_exec(char *line)
       else                { App_PostCmd(APP_CMD_SERVO_P90); App_Puts("OK +90\r\n"); }
       break;
     case 'C': App_PostCmd(APP_CMD_SERVO_CENTER); App_Puts("OK SERVO 0\r\n"); break;
+    case 'R':
+    {
+      int mm = (line[1] == '\0') ? (int)REV_EDGE_DEFAULT_MM : parse_int(&line[1]);
+      if (mm < 100) mm = 100;
+      App_SetRevTargetCm((u16)(mm / 10));
+      App_PostCmd(APP_CMD_REV_EDGE);
+      App_Puts("OK REV ");
+      App_PutInt(mm);
+      App_Puts("\r\n");
+      break;
+    }
     case 'V':
     {
       int v = parse_int(&line[1]);
@@ -152,6 +167,7 @@ static void port_poll(CmdPort *p)
 
     if ((b == '\r') || (b == '\n'))
     {
+      if (p->discard) { p->discard = 0u; p->len = 0u; continue; }
       if (p->len > 0u)
       {
         p->line[p->len] = '\0';
@@ -166,12 +182,14 @@ static void port_poll(CmdPort *p)
          baud): throw the partial line away so it can never be turned into a
          command.  Without this, any frame whose byte happens to be 'F' or 'B'
          followed by CR/LF would start the car. */
+      p->discard = 1u;
       p->len = 0u;
     }
     else if (p->len < (u8)(CMD_LINE_MAX - 1u))
     {
       p->line[p->len++] = (char)b;
     }
+    else p->discard = 1u;
   }
 }
 
@@ -199,6 +217,7 @@ void AppCmd_Poll(void)
   port_poll(&s_p1);
   port_poll(&s_p3);
   port_poll(&s_p5);
+  Tune_PollList();
 }
 
 void AppCmd_HandleKey(u8 ev)

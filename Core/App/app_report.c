@@ -7,6 +7,11 @@
   *  priority task, so it can take as long as it likes.
   */
 #include "app_report.h"
+#include <stdio.h>
+#include <string.h>
+#include "FreeRTOS.h"
+#include "semphr.h"
+#include "tune_params.h"
 #include "app_config.h"
 #include "app_if.h"
 #include "app_tasks.h"
@@ -19,32 +24,31 @@
 #include "oled/oled.h"
 #include "servo/servo.h"
 
-#define TX_TIMEOUT_MS  20u
+static StaticSemaphore_t tx_storage;
+static SemaphoreHandle_t tx_lock;
+void Report_Init(void) { tx_lock=xSemaphoreCreateMutexStatic(&tx_storage); }
 
 static UART_HandleTypeDef *const s_ports[3] = { &huart1, &huart3, &huart5 };
 
 static void put_raw(UART_HandleTypeDef *h, const char *s)
 {
-  uint16_t n = 0u;
-
-  while ((s[n] != '\0') && (n < 200u)) n++;
-  if (n == 0u) return;
-
-  (void)HAL_UART_Transmit(h, (uint8_t *)s, n, TX_TIMEOUT_MS);
+  size_t n=strlen(s);
+  if (n) (void)HAL_UART_Transmit(h,(uint8_t *)s,(uint16_t)n,10u+(uint32_t)n/10u);
 }
 
 void App_Puts(const char *s)
 {
   u8 i;
 
+  xSemaphoreTake(tx_lock,portMAX_DELAY);
   for (i = 0u; i < 3u; i++) put_raw(s_ports[i], s);
+  xSemaphoreGive(tx_lock);
 }
 
 void App_PutInt(int v)
 {
   char b[12];
   u8   n = 0u;
-  u8   i;
 
   if (v < 0) { b[n++] = '-'; v = -v; }
   if (v == 0) { b[n++] = '0'; }
@@ -57,19 +61,37 @@ void App_PutInt(int v)
   }
   b[n] = '\0';
 
-  for (i = 0u; i < 3u; i++) put_raw(s_ports[i], b);
+  App_Puts(b);
 }
 
 /* ----------------------------------------------------------------------- */
 /*  1 Hz telemetry                                                         */
 /* ----------------------------------------------------------------------- */
-static void log_angles(const s16 angle10[4])
+static void format_angles(char out[32], const s16 angles[4])
 {
+  size_t used=0;
   for (unsigned w=0; w<4; ++w) {
-    if (w) App_Puts("/");
-    if (angle10[w]==SERVO_ANGLE_NA) App_Puts("NA");
-    else App_PutInt(angle10[w]);
+    if (w) out[used++]='/';
+    used += angles[w]==SERVO_ANGLE_NA ? snprintf(out+used,32-used,"NA")
+                                      : snprintf(out+used,32-used,"%d",angles[w]);
   }
+}
+
+void Report_Heading(void)
+{
+  AppInputs in;
+  char line[192];
+  App_ReadInputs(&in);
+  const HeadingLog *h = &in.heading;
+  if (h->mode == APP_MODE_IDLE || h->mode == APP_MODE_WHEELTEST) return;
+  int n = snprintf(line, sizeof line,
+      "HDG MS=%lu MODE=%u F2=%u IMU=%u YAW10=%d RATE10=%d RAW=%d COR=%d"
+      " TGT=%d/%d/%d/%d MEAS=%d/%d/%d/%d PV=%lu\r\n",
+      (unsigned long)in.ms, (unsigned)h->mode, (unsigned)h->stage, (unsigned)in.imu_ok,
+      (int)(in.yaw_deg*10), (int)(in.yaw_rate_dps*10), h->raw, h->correction,
+      h->target[0], h->target[1], h->target[2], h->target[3],
+      h->measured[0], h->measured[1], h->measured[2], h->measured[3], (unsigned long)h->param_revision);
+  if (n > 0 && (size_t)n < sizeof line) App_Puts(line);
 }
 
 void Report_Log(void)
@@ -104,66 +126,30 @@ void Report_Log(void)
     }
   }
 
-  App_Puts("SPD ");
-  App_PutInt((int)App_GetBaseSpeed());
-  App_Puts(" MODE=");
-  App_PutInt((int)AppControl_Mode());
-  App_Puts(" SF=");
-  App_PutInt((int)AppControl_SafetyFlags());
-
-  App_Puts(" CNT=");
-  App_PutInt((int)in->wheel_cnt[0]); App_Puts("/");
-  App_PutInt((int)in->wheel_cnt[1]); App_Puts("/");
-  App_PutInt((int)in->wheel_cnt[2]); App_Puts("/");
-  App_PutInt((int)in->wheel_cnt[3]);
-
-  /* What the firmware is actually commanding. All zeros while the wheels are
-     spinning => the bridge is being driven from somewhere else. */
-  {
-    s16 pwm[4];
-    AppControl_GetPwm(pwm);
-    App_Puts(" PWM=");
-    App_PutInt((int)pwm[0]); App_Puts("/");
-    App_PutInt((int)pwm[1]); App_Puts("/");
-    App_PutInt((int)pwm[2]); App_Puts("/");
-    App_PutInt((int)pwm[3]);
-  }
-
-  App_Puts(" YAW=");
-  App_PutInt((int)(in->yaw_deg * 10.0f));
-  App_Puts(" RATE=");
-  App_PutInt((int)(in->yaw_rate_dps * 10.0f));
-
-  App_Puts(" VB=");
-  App_PutInt((int)((float)in->batt_adc * 3.3f * 11.0f * 0.99f / 4096.0f * 10.0f));
-
-  App_Puts(" LS=");
-  App_PutInt((in->dL == BSP_DIST_INVALID) ? -1 : (int)in->dL); App_Puts(",");
-  App_PutInt((in->dR == BSP_DIST_INVALID) ? -1 : (int)in->dR); App_Puts(",");
-  App_PutInt((in->dF == BSP_DIST_INVALID) ? -1 : (int)in->dF); App_Puts(",");
-  App_PutInt((int)in->laser_flags);
-
-  App_Puts(" RG=");
-  App_PutInt((in->dB == BSP_DIST_INVALID) ? -1 : (int)in->dB); App_Puts(",");
-  App_PutInt((int)in->vB);
-
-  App_Puts(" F2=");
-  App_PutInt((int)Fsm2_GetState());
-  App_Puts(" FA=");
-  App_PutInt((int)Fsm2_GetFaultCode());
-
-  App_Puts(" LZ=");
-  App_Puts(in->laser_fresh ? "OK" : "LOST");
-
-  App_Puts(" DIST=");
-  App_PutInt((int)App_GetDistanceCm());
-
-  App_Puts("\r\n");
-  App_Puts("STEER TGT10=");
-  log_angles(in->steer_target10);
-  App_Puts(" ACT10=");
-  log_angles(in->steer_feedback10);
-  App_Puts("\r\n");
+  char line[240], target[32], actual[32];
+  s16 pwm[4];
+  AppControl_GetPwm(pwm);
+  int n=snprintf(line,sizeof line,
+    "SPD %d MODE=%d SF=%u CNT=%d/%d/%d/%d PWM=%d/%d/%d/%d YAW=%d RATE=%d"
+    " VB=%d LS=%d,%d,%d,%u RG=%d,%u F2=%u FA=%u LZ=%s DIST=%u PV=%lu\r\n",
+    App_GetBaseSpeed(),(int)AppControl_Mode(),AppControl_SafetyFlags(),
+    in->wheel_cnt[0],in->wheel_cnt[1],in->wheel_cnt[2],in->wheel_cnt[3],
+    pwm[0],pwm[1],pwm[2],pwm[3],(int)(in->yaw_deg*10),(int)(in->yaw_rate_dps*10),
+    (int)(in->batt_adc*3.3f*11.0f*0.99f/4096.0f*10),
+    in->dL==BSP_DIST_INVALID?-1:in->dL,in->dR==BSP_DIST_INVALID?-1:in->dR,
+    in->dF==BSP_DIST_INVALID?-1:in->dF,in->laser_flags,
+    in->dB==BSP_DIST_INVALID?-1:in->dB,in->vB,(unsigned)Fsm2_GetState(),
+    Fsm2_GetFaultCode(),in->laser_fresh?"OK":"LOST",App_GetDistanceCm(),
+    (unsigned long)in->heading.param_revision);
+  if (n>0 && (size_t)n<sizeof line) App_Puts(line);
+  snprintf(line,sizeof line,"LASER MS=%lu CFG=%u HEAD=%u TAIL=%u FLAGS=%u TLRB=%u/%u/%u\r\n",
+           (unsigned long)in->ms, in->use_tail ? 6u : 3u, in->laser_fresh, in->tail_fresh,
+           in->tail_flags, in->tail_left, in->tail_right, in->tail_back);
+  App_Puts(line);
+  format_angles(target,in->steer_target10);
+  format_angles(actual,in->steer_feedback10);
+  snprintf(line,sizeof line,"STEER TGT10=%s ACT10=%s\r\n",target,actual);
+  App_Puts(line);
 }
 
 /* ----------------------------------------------------------------------- */
@@ -213,6 +199,7 @@ void Report_Ui(void)
     case APP_MODE_CRAB:      OLED_ShowString(64, 0, (const u8 *)"CRAB"); break;
     case APP_MODE_DRIVE:     OLED_ShowString(64, 0, (const u8 *)"DRIVE"); break;
     case APP_MODE_WHEELTEST: OLED_ShowString(64, 0, (const u8 *)"WHEEL"); break;
+    case APP_MODE_REV_EDGE:  OLED_ShowString(64, 0, (const u8 *)"REV");   break;
     default:                 OLED_ShowString(64, 0, (const u8 *)"IDLE"); break;
   }
 

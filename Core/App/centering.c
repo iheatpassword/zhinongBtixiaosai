@@ -45,6 +45,7 @@
   *  C90 / ASCII only (Keil ARMCC AC5, project is GBK).
   */
 
+#include "tune_params.h"
 #include "centering.h"
 
 /* sentinel value for "the servo angle we last sent is unknown" */
@@ -303,10 +304,10 @@ void Centering_Update(const LaserData *laser, float yaw_deg, float yaw_rate_dps,
     e_use = 0.0f;
   }
 
-  p = CENTER_E_KP * e_use;
-  d = (e_use != 0.0f) ? (CENTER_E_KD * s_e_d) : 0.0f;
+  p = app_tune->center_e_kp * e_use;
+  d = (e_use != 0.0f) ? (app_tune->center_e_kd * s_e_d) : 0.0f;
 
-  i_new = s_i_e + (CENTER_E_KI * e_use) * CENTER_DT_S;
+  i_new = s_i_e + (app_tune->center_e_ki * e_use) * CENTER_DT_S;
   i_new = cf_limit(i_new, CENTER_E_I_MAX);
 
   out  = p + d + i_new;
@@ -333,18 +334,18 @@ void Centering_Update(const LaserData *laser, float yaw_deg, float yaw_rate_dps,
   yaw_rate = CENTER_YAW_SIGN * yaw_rate_dps;
   yaw_err  = cf_limit(yaw_err, CENTER_YAW_MAX_DEG);
 
-  i_new = s_i_yaw + (CENTER_YAW_KI * yaw_err) * CENTER_DT_S;
+  i_new = s_i_yaw + (app_tune->center_yaw_ki * yaw_err) * CENTER_DT_S;
   i_new = cf_limit(i_new, CENTER_YAW_I_MAX);
 
   /* yaw > 0 (nose left) must produce Delta < 0 (yaw right) */
-  out  = -(CENTER_YAW_KP * yaw_err + CENTER_YAW_KD * yaw_rate + i_new);
+  out  = -(app_tune->center_yaw_kp * yaw_err + app_tune->center_yaw_kd * yaw_rate + i_new);
   sat_y = 0u;
   if (out >  CENTER_TOE_MAX) { out =  CENTER_TOE_MAX; sat_y = 1u; }
   if (out < -CENTER_TOE_MAX) { out = -CENTER_TOE_MAX; sat_y = 1u; }
   if (sat_y != 0u)
   {
-    i_new = cf_limit(-out - CENTER_YAW_KP * yaw_err
-                          - CENTER_YAW_KD * yaw_rate, CENTER_YAW_I_MAX);
+    i_new = cf_limit(-out - app_tune->center_yaw_kp * yaw_err
+                          - app_tune->center_yaw_kd * yaw_rate, CENTER_YAW_I_MAX);
   }
   s_i_yaw = i_new;
 
@@ -364,9 +365,9 @@ void Centering_Update(const LaserData *laser, float yaw_deg, float yaw_rate_dps,
   /*  7. per-wheel speed targets                                       */
   /* ================================================================= */
   /* resist the yaw rate with a bounded differential: a positive yaw rate
-   * (turning left) slows the right hand wheels down.  CENTER_SPD_DIFF_KD is
+   * (turning left) slows the right hand wheels down.  app_tune->center_spd_diff_kd is
    * 0 by default, so dif stays 0 unless the Lead enables it. */
-  dif = (s16)(-CENTER_SPD_DIFF_KD * yaw_rate);
+  dif = (s16)(-app_tune->center_spd_diff_kd * yaw_rate);
   dif_lim = (s16)(CENTER_SPD_DIFF_MAX *
                   ((base_spd >= 0) ? (float)base_spd : -(float)base_spd));
   if (dif >  dif_lim) dif =  dif_lim;

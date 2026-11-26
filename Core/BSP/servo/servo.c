@@ -124,6 +124,11 @@ void Servo_ReadFeedback(s16 angle10[4])
   }
 }
 
+u32 Servo_FeedbackTime(unsigned wheel_index)
+{
+  return sample_ms[wheel_index];
+}
+
 void Servo_Center(void)
 {
   servo_move(SERVO_BROADCAST_ID, (uint16_t)SERVO_CENTER, (uint16_t)SERVO_SLOW_MS);

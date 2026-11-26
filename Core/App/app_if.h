@@ -26,6 +26,7 @@ typedef enum
   APP_CMD_FSM2,          /* full 5-ridge competition sequence            */
   APP_CMD_CRAB_R,        /* crab right test                              */
   APP_CMD_CRAB_L,        /* crab left test                               */
+  APP_CMD_REV_EDGE,      /* reverse back along the left wall (R)         */
   APP_CMD_SERVO_CENTER,  /* all servos to 0 deg                          */
   APP_CMD_SERVO_P90,     /* all servos to +90 deg                        */
   APP_CMD_SERVO_M90,     /* all servos to -90 deg                        */
@@ -40,12 +41,17 @@ typedef enum
   APP_MODE_EDGE,         /* 4WS edge following                           */
   APP_MODE_FSM2,         /* Fsm2_Tick() is driving the output            */
   APP_MODE_CRAB,         /* standalone crab / ridge test                 */
-  APP_MODE_WHEELTEST
+  APP_MODE_WHEELTEST,
+  APP_MODE_REV_EDGE      /* reverse back along the left wall (appended so
+                            the existing MODE numbers stay stable)        */
 } AppMode;
 
 /* Post a command from any task.  Pending STOP takes precedence; otherwise the last command
    wins. The control task consumes it atomically. */
 void App_PostCmd(AppCmd c);
+
+/* Reverse distance for the next APP_CMD_REV_EDGE, in cm. */
+void App_SetRevTargetCm(u16 cm);
 
 /* Base speed for plain F/B and for the modes, counts per 20 ms. */
 void App_SetBaseSpeed(s16 counts);
@@ -69,7 +75,7 @@ struct AppInputs;   /* defined in app_tasks.h */
 struct AppOutputs;
 
 void    AppControl_Init(void);
-void    AppControl_Tick(const struct AppInputs *in, struct AppOutputs *out);
+void    AppControl_Tick(struct AppInputs *in, struct AppOutputs *out);
 AppMode AppControl_Mode(void);
 
 /* Safety layer state, bit0 = distance stop, bit1 = stall. The trip is not

@@ -31,6 +31,7 @@ void Servo_SetOneDeg(uint8_t id, float deg);
 void Servo_Set4Deg(float fl, float fr, float rl, float rr);
 /* Control task: finish previous read before steering TX, query after steering TX. */
 void Servo_ReadFeedback(s16 angle10[4]);
+u32 Servo_FeedbackTime(unsigned wheel_index);
 void Servo_QueryNext(void);
 void Servo_RxIRQ(void);
 

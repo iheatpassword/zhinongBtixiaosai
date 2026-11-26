@@ -10,6 +10,7 @@
   *  Everything here runs in the control task at exactly 50 Hz and must never
   *  block.  The servo frames are the only I/O, and they are ~3.5 ms.
   */
+#include "tune_params.h"
 #include "app_if.h"
 #include "app_config.h"
 #include "app_tasks.h"
@@ -22,6 +23,7 @@
 #include "motor/motor.h"
 #include "servo/servo.h"
 #include "imu/imu.h"
+#include <math.h>
 
 /* ----------------------------------------------------------------------- */
 /*  state                                                                  */
@@ -29,6 +31,7 @@
 static AppMode s_mode;
 static volatile u8 s_pending_cmd;
 static s16 s_base_spd;
+static volatile u16 s_rev_target_cm = 370u;   /* distance for the R command */
 
 /* speed loop */
 static s16 s_tgt[4];            /* desired counts per 20 ms, signed        */
@@ -53,6 +56,9 @@ static u16 s_test_origin;
 static u32 s_test_ms;
 static EntryWall s_test_wall;
 static u32 s_test_wall_last_ok;
+static u32 s_edge_last_ok;     /* last tick with a valid leading range */
+static u32 s_edge_lost_ms;     /* when the leading range was first lost   */
+static u8  s_edge_lost;
 static s16 s_crab_dir;
 static Fsm2Output s_f2out;
 
@@ -72,6 +78,8 @@ static s16 s_applied[4];
 /* Boot settle: motion commands are dropped until this window expires. */
 #define BOOT_SETTLE_MS 3000u
 static u8  s_armed;
+static u8 s_run_tail, s_tail_wait;
+static u32 s_tail_lost_ms;
 static u32 s_boot_ms;
 
 /* Motor driver enable (PD3), refreshed on every control tick. */
@@ -89,13 +97,28 @@ static s16 clamp_s16f(float v, float lo, float hi)
 
 static void set_steer_all(float deg)
 {
-  s16 next=clamp_s16f(deg*10.0f,-(90+CRAB_TRIM_MAX_DEG)*10,(90+CRAB_TRIM_MAX_DEG)*10);
+  s16 next=clamp_s16f(deg*10.0f,-(90+app_tune->crab_trim_max_deg)*10,(90+app_tune->crab_trim_max_deg)*10);
   if (next==s_steer10[0] && next==s_steer10[1] && next==s_steer10[2] && next==s_steer10[3]) return;
   s_steer10[0]=next;
   s_steer10[1] = s_steer10[0];
   s_steer10[2] = s_steer10[0];
   s_steer10[3] = s_steer10[0];
   s_steer_dirty = 1u;
+}
+
+/* Apply a crab angle with an optional front/rear split.  With trim == 0 this is
+   exactly set_steer_all(); with a trim the four wheels are no longer parallel,
+   so the body rotates while it translates.  That rotation is the only way to
+   correct a heading error on this chassis - the left/right differential is
+   mechanically coupled and delivers a few percent of what it is asked for. */
+static void apply_steer_split(float angle, float trim)
+{
+  if ((trim > -0.05f) && (trim < 0.05f))
+  {
+    set_steer_all(angle);
+    return;
+  }
+  App_SetSteer4(angle + trim, angle + trim, angle - trim, angle - trim);
 }
 
 static void drive_zero(void)
@@ -114,34 +137,43 @@ static void all_zero(void)
   drive_zero();
 }
 
-static float reverse_wall_angle(const AppInputs *in, int left_wall)
+/* Position and wheel split both reverse sign when driving backwards. */
+static float reverse_wall_angle(const AppInputs *in, int left, int standalone, float *trim)
 {
-  u16 d=left_wall ? in->dL : in->dR;
-  float angle=0;
-  if (d<300u) {
-    float error=(float)d-SIDE_CENTER_MM;
-    angle=(left_wall ? 1.0f : -1.0f)*EDGE_KP*error;
-  }
-  if (angle>EDGE_MAX) angle=EDGE_MAX;
-  if (angle<-EDGE_MAX) angle=-EDGE_MAX;
-  return angle;
+  float center = left ? in->dL : in->dR;
+  *trim = 0;
+  if (center >= 300u) return 0;
+  EntryWall_Pair(in, left, 300u, &center, trim);
+  *trim = -*trim;
+  float target = left ? app_tune->entry_side_target_mm : SIDE_CENTER_MM;
+  float kp = standalone ? app_tune->entry_wall_kp : app_tune->edge_kp;
+  float limit = standalone ? app_tune->entry_wall_max_deg : app_tune->edge_max;
+  float angle = (left ? -1.0f : 1.0f) * kp * (center - target);
+  return fminf(limit, fmaxf(-limit, angle));
 }
 
-static void longitudinal(const AppInputs *in, s16 speed, float angle)
+void App_SetRevTargetCm(u16 cm)
+{
+  s_rev_target_cm = (cm < 20u) ? 20u : cm;
+}
+
+static void longitudinal(const AppInputs *in, s16 speed, float angle, HeadingLog *log)
 {
   int dir=speed<0 ? -1 : 1;
   /* Forward feed-forward was measured at EDGE_SPD. Keep its wheel-speed
      ratio at the slower entry speeds; reverse retains its existing trim. */
-  float feedforward=speed>0 ? DIFF_FF*(float)speed/EDGE_SPD : -DIFF_FF;
-  float corr=feedforward + YAW_DRIVE_KP*in->yaw_deg + YAW_DRIVE_KD*in->yaw_rate_dps;
-  corr=clamp_s16f(corr,-150,150);
+  float feedforward=speed>0 ? app_tune->diff_ff*(float)speed/EDGE_SPD : -app_tune->diff_ff;
+  float corr=feedforward + app_tune->yaw_drive_kp*in->yaw_deg + app_tune->yaw_drive_kd*in->yaw_rate_dps;
+  log->raw=(int)corr;
+  corr=clamp_s16f(corr,-app_tune->yaw_drive_max,app_tune->yaw_drive_max);
+  log->correction=(s16)corr;
   set_steer_all(angle);
   s_tgt[0]=s_tgt[2]=speed+(s16)corr;
   s_tgt[1]=s_tgt[3]=speed-(s16)corr;
   s_drive=dir;
 }
 
-static void crab_step(const AppInputs *in, int dir, s16 speed, int tracking)
+static void crab_step(const AppInputs *in, int dir, s16 speed, int tracking, HeadingLog *log)
 {
   float error=0;
   int f=tracking && in->vF && in->dF>=70 && in->dF<=380;
@@ -152,13 +184,14 @@ static void crab_step(const AppInputs *in, int dir, s16 speed, int tracking)
       error=0.5f*((float)in->dF-ENTRY_STOP_MM+REAR_TARGET_MM-in->dB);
   } else if (f) error=(float)in->dF-ENTRY_STOP_MM;
   else if (b) error=(float)REAR_TARGET_MM-in->dB;
-  float trim=0.10f*error;
-  if (trim>CRAB_TRIM_MAX_DEG) trim=CRAB_TRIM_MAX_DEG;
-  if (trim<-CRAB_TRIM_MAX_DEG) trim=-CRAB_TRIM_MAX_DEG;
+  float trim=app_tune->crab_trim_kp*error;
+  if (trim>app_tune->crab_trim_max_deg) trim=app_tune->crab_trim_max_deg;
+  if (trim<-app_tune->crab_trim_max_deg) trim=-app_tune->crab_trim_max_deg;
   set_steer_all(dir*(90.0f-trim));
-  s16 cy=dir*SHIFT_YAW_SPD_SIGN*clamp_s16f(
-      SHIFT_YAW_SPD_KP*in->yaw_deg+SHIFT_YAW_SPD_KD*in->yaw_rate_dps,
-      -SHIFT_YAW_SPD_MAX,SHIFT_YAW_SPD_MAX);
+  float demand=app_tune->shift_yaw_spd_kp*in->yaw_deg+app_tune->shift_yaw_spd_kd*in->yaw_rate_dps;
+  s16 cy=dir*SHIFT_YAW_SPD_SIGN*clamp_s16f(demand,-app_tune->shift_yaw_spd_max,app_tune->shift_yaw_spd_max);
+  log->raw=(int)(dir*SHIFT_YAW_SPD_SIGN*demand);
+  log->correction=cy;
   s_tgt[0]=s_tgt[1]=speed-cy;
   s_tgt[2]=s_tgt[3]=speed+cy;
   s_drive=1;
@@ -205,16 +238,16 @@ static void speed_step(const AppInputs *in, AppOutputs *out)
     }
 
     e = (s32)s_mtgt[w] - (s32)s_meas[w];
-    s_integ[w] += e / KI_DIV;
-    if (s_integ[w] >  INTEG_MAX) s_integ[w] =  INTEG_MAX;
-    if (s_integ[w] < -INTEG_MAX) s_integ[w] = -INTEG_MAX;
+    s_integ[w] += e / app_tune->ki_div;
+    if (s_integ[w] >  app_tune->integ_max) s_integ[w] =  app_tune->integ_max;
+    if (s_integ[w] < -app_tune->integ_max) s_integ[w] = -app_tune->integ_max;
 
-    p = (s32)(KP_NUM * e) / 10 + s_integ[w] + PWM_FF + ((s32)s_mtgt[w] * 25) / 10;
-    if (p > PWM_LIM) p = PWM_LIM;
+    p = (s32)(app_tune->kp_num * e) / 10 + s_integ[w] + app_tune->pwm_ff + ((s32)s_mtgt[w] * app_tune->wheel_ff_num) / 10;
+    if (p > app_tune->pwm_lim) p = app_tune->pwm_lim;
     if (p < 0)       p = 0;
 
-    if (p > (s32)s_pwm[w] + PWM_SLEW) p = (s32)s_pwm[w] + PWM_SLEW;
-    if (p < (s32)s_pwm[w] - PWM_SLEW) p = (s32)s_pwm[w] - PWM_SLEW;
+    if (p > (s32)s_pwm[w] + app_tune->pwm_slew) p = (s32)s_pwm[w] + app_tune->pwm_slew;
+    if (p < (s32)s_pwm[w] - app_tune->pwm_slew) p = (s32)s_pwm[w] - app_tune->pwm_slew;
     if (p < 0) p = 0;
 
     s_pwm[w]    = (s16)p;
@@ -247,6 +280,12 @@ static void safety_eval(const AppInputs *in, AppOutputs *out)
   raw.vL = in->vL;
   raw.vR = in->vR;
 
+  /* Side clearance is the nearer end, independent of the guidance geometry.
+     Keep the old nose-mounted back-facing beam distinct from the tail beam. */
+  if (in->tail_left < raw.dL) { raw.dL=in->tail_left; raw.vL=raw.dL<BSP_DIST_OVERRANGE; }
+  if (in->tail_right < raw.dR) { raw.dR=in->tail_right; raw.vR=raw.dR<BSP_DIST_OVERRANGE; }
+  if (in->tail_back < raw.dB) { raw.dB=in->tail_back; raw.vB=raw.dB<BSP_DIST_OVERRANGE; }
+
   Safety_Filter(&raw, &s_sf);
 
   for (w = 0u; w < 4u; w++)
@@ -265,6 +304,28 @@ static void safety_eval(const AppInputs *in, AppOutputs *out)
   s_safety = trip;
 
   if (trip == 0u) return;
+
+  /* A distance trip means "do not drive further into this", not "freeze".
+     Backing away is always allowed and clipped to a creep PWM, so a car that
+     stopped hard against a wall can still get itself out with B or R.  Stall
+     and enable-low keep the full veto.
+     The test is on the mode's intent, not s_drive: the settle phase of a mode
+     zeroes s_drive, and using it here let the trip kill the mode before the
+     car ever had a chance to move. */
+  if ((trip == 0x01u) && in->tail_back >= SAFE_STOP_MM &&
+      (!s_sf.vB || s_sf.dB >= SAFE_STOP_MM) &&
+      ((s_mode == APP_MODE_REV_EDGE) ||
+       ((s_mode == APP_MODE_DRIVE) && (s_drive < 0))))
+  {
+    for (w = 0u; w < 4u; w++)
+    {
+      s16 p = out->pwm[w];
+      if (p >  SAFE_ESCAPE_PWM) p =  SAFE_ESCAPE_PWM;
+      if (p < -SAFE_ESCAPE_PWM) p = -SAFE_ESCAPE_PWM;
+      out->pwm[w] = p;
+    }
+    return;                       /* keep the mode so the escape can finish */
+  }
 
   /* Stop immediately and drop back to IDLE.  The fault is NOT latched: once
      the obstruction is gone a new command may move again, which is the
@@ -317,6 +378,11 @@ static void handle_cmd(AppCmd c, const AppInputs *in)
     Fsm2_Abort();
     all_zero();
     s_mode=APP_MODE_IDLE;
+  }
+  if (c == APP_CMD_EDGE || c == APP_CMD_FSM2 || c == APP_CMD_REV_EDGE ||
+      c == APP_CMD_CRAB_L || c == APP_CMD_CRAB_R) {
+    s_run_tail = in->tail_fresh;
+    s_tail_wait = 0;
   }
   switch (c)
   {
@@ -374,6 +440,14 @@ static void handle_cmd(AppCmd c, const AppInputs *in)
       s_test_origin=App_GetDistanceCm();
       s_test_ms=in->ms;
       set_steer_all(90*s_crab_dir);
+      IMU_ResetYaw();
+      break;
+
+    case APP_CMD_REV_EDGE:
+      s_mode       = APP_MODE_REV_EDGE;
+      s_test_origin= App_GetDistanceCm();
+      s_test_ms    = in->ms;
+      App_SetServoCenter();
       IMU_ResetYaw();
       break;
 
@@ -435,10 +509,11 @@ AppMode AppControl_Mode(void)
   return s_mode;
 }
 
-void AppControl_Tick(const AppInputs *in, AppOutputs *out)
+void AppControl_Tick(AppInputs *in, AppOutputs *out)
 {
   u8 w;
   int wheel_override=-1;
+  out->heading=(HeadingLog){.param_revision=Tune_Revision()};
 
   /* Open the motion gate once the board has settled after reset. */
   if ((s_armed == 0u) && ((u32)(BSP_Ms() - s_boot_ms) >= BOOT_SETTLE_MS))
@@ -472,7 +547,21 @@ void AppControl_Tick(const AppInputs *in, AppOutputs *out)
   }
 
   /* 2. mode logic -> s_tgt / steering */
-  switch (s_mode)
+  int guided = s_mode==APP_MODE_FSM2 || s_mode==APP_MODE_EDGE ||
+               s_mode==APP_MODE_CRAB || s_mode==APP_MODE_REV_EDGE;
+  in->use_tail = guided && s_run_tail;
+  /* A run which began with the rear board must not silently lose its clearance
+     protection. A fresh 2000 (no echo) is distinct from a missing sample. */
+  int tail_missing = in->use_tail && (!in->tail_fresh || (in->tail_flags & 0x16u) != 0x16u);
+  if (!tail_missing) s_tail_wait = 0;
+  if (tail_missing) {
+    all_zero();
+    if (!s_tail_wait) { s_tail_wait = 1; s_tail_lost_ms = in->ms; }
+    if (in->ms - s_tail_lost_ms >= 400u) {
+      if (s_mode == APP_MODE_FSM2) Fsm2_Fail(F2_MISSING_RANGE);
+      s_mode = APP_MODE_IDLE;
+    }
+  } else switch (s_mode)
   {
     case APP_MODE_FSM2:
       Fsm2_Tick(in,App_GetDistanceCm(),&s_f2out);
@@ -480,14 +569,17 @@ void AppControl_Tick(const AppInputs *in, AppOutputs *out)
         all_zero();
         set_steer_all(s_f2out.steer_deg);
       } else if (s_f2out.action==F2A_FWD) {
-        longitudinal(in,s_f2out.slow ? ROUTE_CREEP_COUNTS : s_f2out.forward_speed,
-                     s_f2out.steer_deg);
+        longitudinal(in,s_f2out.forward_speed < s_f2out.speed_limit ? s_f2out.forward_speed : s_f2out.speed_limit,
+                     s_f2out.steer_deg,&out->heading);
+        apply_steer_split(s_f2out.steer_deg, s_f2out.steer_trim_deg);
       } else if (s_f2out.action==F2A_REV) {
-        s16 speed=s_f2out.slow ? ROUTE_CREEP_COUNTS : REV_SPD;
-        longitudinal(in,-speed,reverse_wall_angle(in,s_f2out.wall_left));
+        float trim;
+        float angle = reverse_wall_angle(in, s_f2out.wall_left, 0, &trim);
+        longitudinal(in,-s_f2out.speed_limit,angle,&out->heading);
+        apply_steer_split(angle,trim);
       } else {
         crab_step(in,s_f2out.action==F2A_CRAB_R ? 1 : -1,
-                  s_f2out.slow ? ROUTE_CREEP_COUNTS : SHIFT_SPD,s_f2out.track_ridge);
+                  s_f2out.speed_limit,s_f2out.track_ridge,&out->heading);
       }
       if (Fsm2_GetState()==F2_FAULT || Fsm2_GetState()==F2_DONE) s_mode=APP_MODE_IDLE;
       break;
@@ -497,26 +589,67 @@ void AppControl_Tick(const AppInputs *in, AppOutputs *out)
     {
       int edge=s_mode==APP_MODE_EDGE;
       u16 d=edge ? in->dF : s_crab_dir>0 ? in->dR : in->dL;
-      u16 stop=edge ? ENTRY_STOP_MM : SIDE_CENTER_MM;
+      u16 stop=edge ? app_tune->entry_stop_mm : SIDE_CENTER_MM;
       u16 cm=(u16)(App_GetDistanceCm()-s_test_origin);
-      if (!in->laser_fresh || !in->imu_ok || d==BSP_DIST_INVALID ||
-          d<=stop || cm>(edge ? 490u : CRAB_TRAVEL_CM+20u) ||
-          in->ms-s_test_ms>60000u) {
+      /* One missing front sample must not end the test: near 2 m that channel
+         is over-range and drops out now and then, which used to stop a run
+         after a few hundred millimetres.  Only a sustained loss is fatal. */
+      int d_lost = (d==BSP_DIST_INVALID);
+      if (d_lost) {
+        if (!s_edge_lost) { s_edge_lost=1u; s_edge_lost_ms=in->ms; }
+      } else {
+        s_edge_lost=0u;
+        s_edge_last_ok=in->ms;
+      }
+      if (!in->laser_fresh || !in->imu_ok ||
+          (!d_lost && d<=stop) || cm>(edge ? (u16)app_tune->entry_max_cm : CRAB_TRAVEL_CM+20u) ||
+          in->ms-s_test_ms>60000u ||
+          (d_lost && (in->ms-s_edge_last_ok)>=400u)) {
         s_mode=APP_MODE_IDLE; all_zero(); App_SetServoCenter();
+      } else if (d_lost) {
+        all_zero(); set_steer_all(s_steer10[0]);
       } else if (in->ms-s_test_ms<ROUTE_SETTLE_MS) {
         all_zero(); set_steer_all(edge ? 0 : 90*s_crab_dir);
         s_test_wall_last_ok=in->ms;
       } else if (edge) {
-        EntryWallCommand wall=EntryWall_Update(&s_test_wall,in,cm);
+        EntryWallCommand wall=EntryWall_Update(&s_test_wall,in,cm,app_tune->entry_creep_counts,
+                                               app_tune->entry_cruise_counts);
         if (!wall.speed) {
           all_zero(); set_steer_all(0);
           if (in->ms-s_test_wall_last_ok>=400u) s_mode=APP_MODE_IDLE;
         } else {
           s_test_wall_last_ok=in->ms;
-          longitudinal(in,d<stop+200u ? ROUTE_CREEP_COUNTS : wall.speed,wall.angle);
+          if (wall.coast) {
+            drive_zero();
+            apply_steer_split(wall.angle, wall.yaw_trim_deg);
+          } else {
+            s16 speed=wall.speed;
+            if (d<stop+app_tune->entry_e_slow_mm && speed>app_tune->entry_creep_counts) speed=app_tune->entry_creep_counts;
+            longitudinal(in,speed,wall.angle,&out->heading);
+            apply_steer_split(wall.angle, wall.yaw_trim_deg);
+          }
         }
       }
-      else crab_step(in,s_crab_dir,d<stop+200u ? ROUTE_CREEP_COUNTS : SHIFT_SPD,1);
+      else crab_step(in,s_crab_dir,d<stop+200u ? ROUTE_CREEP_COUNTS : SHIFT_SPD,1,&out->heading);
+      break;
+    }
+
+    case APP_MODE_REV_EDGE:
+    {
+      /* Back out along the left wall so the tuning loop can repeat E without
+         anyone touching the car.  The caller passes the distance to cover. */
+      u16 cm=(u16)(App_GetDistanceCm()-s_test_origin);
+      if (!in->laser_fresh || !in->imu_ok || cm>=s_rev_target_cm ||
+          in->ms-s_test_ms>90000u) {
+        s_mode=APP_MODE_IDLE; all_zero(); App_SetServoCenter();
+      } else if (in->ms-s_test_ms<ROUTE_SETTLE_MS) {
+        all_zero(); set_steer_all(0);
+      } else {
+        float rev_trim;
+        float rev_angle=reverse_wall_angle(in,1,1,&rev_trim);
+        longitudinal(in,(s16)-REV_EDGE_SPD,rev_angle,&out->heading);
+        apply_steer_split(rev_angle,rev_trim);
+      }
       break;
     }
 
@@ -540,18 +673,20 @@ void AppControl_Tick(const AppInputs *in, AppOutputs *out)
     case APP_MODE_DRIVE:
       if (s_drive != 0)
       {
-        s_diff_i += DIFF_KI * in->yaw_deg * ((float)APP_CTRL_MS / 1000.0f);
-        if (s_diff_i >  DIFF_MAX) s_diff_i =  DIFF_MAX;
-        if (s_diff_i < -DIFF_MAX) s_diff_i = -DIFF_MAX;
+        s_diff_i += app_tune->diff_ki * in->yaw_deg * ((float)APP_CTRL_MS / 1000.0f);
+        if (s_diff_i >  app_tune->diff_max) s_diff_i =  app_tune->diff_max;
+        if (s_diff_i < -app_tune->diff_max) s_diff_i = -app_tune->diff_max;
         /* plain drive keeps the constant trim so a straight run stays straight */
         for (w = 0u; w < 4u; w++)
         {
           float base = (float)((s_drive > 0) ? s_base_spd : -s_base_spd);
-          float corr = DIFF_FF + DIFF_KP * in->yaw_deg + s_diff_i +
-                       DIFF_KD * in->yaw_rate_dps;
+          float corr = app_tune->diff_ff + app_tune->diff_kp * in->yaw_deg + s_diff_i +
+                       app_tune->diff_kd * in->yaw_rate_dps;
           float v;
-          if (corr >  DIFF_MAX) corr =  DIFF_MAX;
-          if (corr < -DIFF_MAX) corr = -DIFF_MAX;
+          out->heading.raw=(int)corr;
+          if (corr >  app_tune->diff_max) corr =  app_tune->diff_max;
+          if (corr < -app_tune->diff_max) corr = -app_tune->diff_max;
+          out->heading.correction=(s16)corr;
           v = (w == 1u || w == 3u) ? (base - corr) : (base + corr);
           s_tgt[w] = (s16)v;
         }
@@ -582,6 +717,13 @@ void AppControl_Tick(const AppInputs *in, AppOutputs *out)
 
   /* 5. safety veto: may zero the output and drop back to IDLE */
   safety_eval(in, out);
+
+  out->heading.mode=s_mode;
+  out->heading.stage=Fsm2_GetState();
+  for (w=0; w<4; ++w) {
+    out->heading.target[w]=s_mtgt[w];
+    out->heading.measured[w]=s_meas[w];
+  }
 
   /* 6. steering */
   for (w = 0u; w < 4u; w++) out->steer_deg10[w] = s_steer10[w];

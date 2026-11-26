@@ -19,7 +19,7 @@ typedef struct
   u8 sample_age[LW_CHANNELS];
 } LaserData;
 
-void Laser_Snapshot(LaserData *data);
+void Laser_Snapshot(LaserData *head, LaserData *tail);
 void Laser_Init(void);      /* starts UART4 DMA circular reception */
 void Laser_Poll(void);      /* call every 5..10 ms: drain, parse, timeout */
 
