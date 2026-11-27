@@ -30,7 +30,9 @@ typedef enum
   APP_CMD_SERVO_CENTER,  /* all servos to 0 deg                          */
   APP_CMD_SERVO_P90,     /* all servos to +90 deg                        */
   APP_CMD_SERVO_M90,     /* all servos to -90 deg                        */
-  APP_CMD_WHEELTEST      /* single-wheel identification                  */
+  APP_CMD_WHEELTEST,     /* single-wheel identification                  */
+  APP_CMD_SERVO_P6,
+  APP_CMD_SERVO_M6
 } AppCmd;
 
 /* Current top-level mode, owned by the control task. */

@@ -18,6 +18,9 @@
 #include "app_config.h"
 #include "app_if.h"
 #include "app_report.h"
+#include "app_tasks.h"
+#include <string.h>
+#include <stdio.h>
 
 #include "usart.h"      /* huart1 / huart3 / huart5 */
 #include "key/key.h"
@@ -86,6 +89,22 @@ static void cmd_exec(char *line)
   }
 
   if (i == 0u) return;
+  if (strcmp(line, "J6") == 0 || strcmp(line, "J-6") == 0) {
+    App_PostCmd(line[1] == '-' ? APP_CMD_SERVO_M6 : APP_CMD_SERVO_P6);
+    return;
+  }
+  if (strcmp(line, "J?") == 0) {
+    AppInputs in;
+    char out[144];
+    App_ReadInputs(&in);
+    snprintf(out, sizeof out, "STEP MS=%lu T=%d ACT=%d/%d/%d/%d AT=%lu/%lu/%lu/%lu\r\n",
+             (unsigned long)in.ms, in.steer_target10[0],
+             in.steer_feedback10[0], in.steer_feedback10[1], in.steer_feedback10[2], in.steer_feedback10[3],
+             (unsigned long)in.steer_sample_ms[0], (unsigned long)in.steer_sample_ms[1],
+             (unsigned long)in.steer_sample_ms[2], (unsigned long)in.steer_sample_ms[3]);
+    App_Puts(out);
+    return;
+  }
   if (line[0] == 'P' && (line[1] == ' ' || !line[1])) { Tune_Command(line); return; }
 
   /* Shape check: one command letter, then only digits / '-' / spaces.

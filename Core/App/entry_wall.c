@@ -28,6 +28,11 @@ EntryWallCommand EntryWall_Update(EntryWall *wall, const AppInputs *in, u16 trav
                                   s16 search_speed, s16 cruise_speed)
 {
   EntryWallCommand cmd = {0};
+  /* The calibration probe must work even when no wall is in view: the early
+     returns below (search, no votes, lost rail) never reach the trim block, so
+     a probe set further down would silently stay zero and look like "the split
+     has no effect". */
+  cmd.yaw_trim_deg = app_tune->entry_debug_split_deg;
   /* Two thresholds: nothing but a genuine rail may start the follow (the rail
      always reads under 100 mm when first met), but once locked a wider return
      must not drop the creep and brake the car. */
@@ -55,6 +60,14 @@ EntryWallCommand EntryWall_Update(EntryWall *wall, const AppInputs *in, u16 trav
        that the caller stops the car and raises F2_MISSING_RANGE. */
     if (!wall->acquired && travel_cm < app_tune->entry_search_limit_cm)
       cmd.speed = search_speed;
+    /* The search leg gets the same braking curve as the tracking leg.  Searching
+       blind at cruise is fine while the corridor is clear, but the ridge still
+       has to stop the car, and this branch returns before the ramp below. */
+    {
+      float cap = sqrtf(2.0f * app_tune->entry_decel_mm_s2 * (float)in->dF) / MM_S_PER_COUNT;
+      if (cap < (float)cmd.speed) cmd.speed = (s16)cap;
+      if (cmd.speed < 0) cmd.speed = 0;
+    }
     return cmd;
   }
 
@@ -135,11 +148,22 @@ EntryWallCommand EntryWall_Update(EntryWall *wall, const AppInputs *in, u16 trav
     if (cmd.angle >  app_tune->entry_wall_max_deg) cmd.angle =  app_tune->entry_wall_max_deg;
     if (cmd.angle < -app_tune->entry_wall_max_deg) cmd.angle = -app_tune->entry_wall_max_deg;
   }
+  /* Calibration probe: a known constant added to the common angle. */
+  cmd.angle += app_tune->entry_debug_angle_deg;
+  if (cmd.angle >  app_tune->entry_wall_max_deg) cmd.angle =  app_tune->entry_wall_max_deg;
+  if (cmd.angle < -app_tune->entry_wall_max_deg) cmd.angle = -app_tune->entry_wall_max_deg;
+
   /* Allow for both steering lag and the time needed to shed wheel speed.
      The range rate is lateral; wheel speed only sets the look-ahead time. */
   float lookahead_s = lead_s + in->wheel_speed_mm_s / (2.0f * app_tune->entry_decel_mm_s2);
   float predicted_mm = center_mm + wall->range_rate * lookahead_s;
-  float error = fmaxf(fabsf((float)error_mm), fabsf(predicted_mm - app_tune->entry_side_target_mm));
+  /* The speed decision uses the lateral error alone.  Folding the predicted
+     lateral position in as well made the look-ahead grow with speed
+     (v/(2*decel)), so the faster the car went the larger the apparent error and
+     the harder the envelope throttled: a self-limiting loop that pinned the
+     entry near 20 cm/s however high the cruise was set (T median 1600 of 5000,
+     V peak 900 mm/s).  Stopping is the job of the dF/1200 ramp instead. */
+  float error = fabsf((float)error_mm);
 
   /* The speed decision runs on a slow average of the error.  The steering loop
      deliberately works the raw error and swings a couple of centimetres; if the
@@ -160,7 +184,25 @@ EntryWallCommand EntryWall_Update(EntryWall *wall, const AppInputs *in, u16 trav
   float fraction = (app_tune->entry_creep_error_mm - speed_error) / (app_tune->entry_creep_error_mm - app_tune->entry_full_error_mm);
   fraction = fminf(1.0f, fmaxf(0.0f, fraction));
   cmd.speed = app_tune->entry_creep_counts;
-  if (wall->cruising) cmd.speed += (s16)((cruise_speed - app_tune->entry_creep_counts) * fraction);
+  /* Reference route style: the forward speed is a constant and the lateral
+     position is corrected by steering (vy), never by slowing down - its vy is
+     clamped to 45 mm/s, so it always runs flat out.  Throttling on the lateral
+     error instead made the speed oscillate with the wall loop and kept the
+     average at a third of the peak (T median 1400 of a 5000 command, V peak
+     907 mm/s).  The envelope survives only as a sanity floor: past
+     entry_creep_error_mm the car has lost the wall and creeps. */
+  if (speed_error < app_tune->entry_creep_error_mm)
+    cmd.speed += (s16)((cruise_speed - app_tune->entry_creep_counts) * fraction);
+  /* Final approach: brake along the physically correct curve for a constant
+     deceleration, v = sqrt(2*a*d), instead of the reference route's linear
+     dF/1200.  Linear starts slowing far too early - at 1.2 m it was already
+     below cruise and the last metre dragged - while sqrt keeps full speed
+     until the braking distance and then sheds it at exactly `decel`. */
+  {
+    float cap = sqrtf(2.0f * app_tune->entry_decel_mm_s2 * (float)in->dF) / MM_S_PER_COUNT;
+    if (cap < (float)cmd.speed) cmd.speed = (s16)cap;
+    if (cmd.speed < 0) cmd.speed = 0;
+  }
   if (cmd.speed > wall->last_speed + app_tune->entry_accel_counts)
     cmd.speed = wall->last_speed + app_tune->entry_accel_counts;
   /* The gyro loop in longitudinal() holds heading even without a wall pair. */
@@ -171,7 +213,29 @@ EntryWallCommand EntryWall_Update(EntryWall *wall, const AppInputs *in, u16 trav
   } else {
     wall->pair_trim_deg = 0;
   }
-  cmd.yaw_trim_deg = wall->pair_trim_deg;
+  /* Split = pair_trim (static body angle) + yaw-rate loop + calibration probe.
+     The yaw loop is a PD on the gyro heading that produces a rate command and
+     then inverts omega = 2*v*delta/L to a split, so the authority no longer
+     depends on speed.  Measured polarity: a POSITIVE split drives the body to a
+     NEGATIVE yaw rate (+8 deg -> -0.8 deg/s), so the rate term is added, not
+     subtracted - getting it backwards turns the loop into positive feedback. */
+  {
+    float wz = app_tune->entry_yaw_wz_kp * in->yaw_deg
+             + app_tune->entry_yaw_wz_kd * (0.0f - in->yaw_rate_dps);
+    float trim;
+    if (wz >  app_tune->entry_yaw_wz_max) wz =  app_tune->entry_yaw_wz_max;
+    if (wz < -app_tune->entry_yaw_wz_max) wz = -app_tune->entry_yaw_wz_max;
+    if (in->wheel_speed_mm_s > 100.0f) {
+      /* deg/s * mm / (mm/s) is already degrees; no rad/deg conversion needed. */
+      trim = wz * app_tune->entry_yaw_wb_mm / (2.0f * in->wheel_speed_mm_s);
+    } else {
+      trim = 0.0f;              /* no speed, no yaw authority: stay parallel */
+    }
+    trim += wall->pair_trim_deg + app_tune->entry_debug_split_deg;
+    if (trim >  app_tune->entry_yaw_trim_max_deg) trim =  app_tune->entry_yaw_trim_max_deg;
+    if (trim < -app_tune->entry_yaw_trim_max_deg) trim = -app_tune->entry_yaw_trim_max_deg;
+    cmd.yaw_trim_deg = trim;
+  }
 
   float creep_mm_s = app_tune->entry_creep_counts * (3.14159265f * WHEEL_DIAMETER_MM * 1000.0f /
                                                      (ENCODER_CPR * APP_CTRL_MS));

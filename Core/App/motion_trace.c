@@ -127,7 +127,9 @@ void MotionTrace_Report(void)
 {
   MotionSample s;
   char line[288];
-  /* Bound UART work per wakeup; DROP exposes any lost records. */
+  /* UART5 carries the trace alone, so the full rate fits: bound the work per
+     wakeup and print every record that made it out of the queue.  DROP exposes
+     anything lost. */
   for (unsigned n=0;queue && n<3 && xQueueReceive(queue,&s,0)==pdPASS;n++) {
     int len=snprintf(line,sizeof line,
       "MOT MS=%lu M=%u F2=%u FL=%u FA=%u WAIT=%u MM=%lu V=%u T=%u PWM=%u"

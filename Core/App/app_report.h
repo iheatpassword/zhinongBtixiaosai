@@ -14,6 +14,7 @@ void Report_Log(void);          /* 1 Hz, log task, may block */
 void Report_Ui(void);           /* 5 Hz, ui task            */
 
 void App_Puts(const char *s);   /* to USART1 + USART3 + UART5 */
+void App_PutsTrace(const char *s); /* high-rate trace: primary port only */
 void App_PutInt(int v);
 
 #endif /* APP_REPORT_H */

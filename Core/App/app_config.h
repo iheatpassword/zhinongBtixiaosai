@@ -57,11 +57,33 @@
 #define ENTRY_YAW_TRIM_GAIN      30.0f /* deg of split per sin(heading error) */
 #define ENTRY_YAW_TRIM_MAX_DEG    6.0f
 #define ENTRY_YAW_TRIM_FILTER_MS 800u  /* only a sustained drift counts as heading */
+/* Yaw-rate damping applied to the front/rear split.  The geometric pair trim
+   removes a static body angle; the gyro rate damps the oscillation itself,
+   which is the part the position loop cannot see.  Gain 0 disables it: the
+   sign must be measured on the car before any feedback gain is trusted. */
+#define ENTRY_YAW_DAMP_GAIN      0.0f  /* deg of split per (deg/s) */
+#define ENTRY_YAW_DAMP_MAX_DEG   3.0f
+/* Yaw-rate closed loop (reference-route style).  A PD on the gyro heading gives
+   a yaw-rate command in deg/s, and the inverse kinematics turn it into a
+   front/rear split: omega = 2*v*delta/L  =>  delta = omega*L/(2v).  Dividing by
+   the wheel speed is what makes the authority speed independent - a fixed split
+   buys only ~1 deg/s at creeping speed, which is why the rate-based trim could
+   never hold a heading. */
+#define ENTRY_YAW_WZ_KP          2.0f  /* deg/s per deg of heading error */
+#define ENTRY_YAW_WZ_KD          0.5f  /* deg/s per (deg/s) of measured rate */
+#define ENTRY_YAW_WZ_MAX        60.0f  /* clamp on the rate command, deg/s */
+#define ENTRY_YAW_WB_MM        500.0f  /* front/rear axle spacing for the split */
+/* Sign-calibration knobs, both 0 in normal use.  Set one, drive E once, and
+   read the direction out of the log; that settles the convention. */
+#define ENTRY_DEBUG_ANGLE_DEG    0.0f  /* added to the common four-wheel angle */
+#define ENTRY_DEBUG_SPLIT_DEG    0.0f  /* added to the front/rear split        */
 #define ENTRY_STEER_LEAD_MS     150u   /* look ahead for steering response */
 #define ENTRY_FULL_ERROR_MM       4.0f /* full cruise within this error */
 #define ENTRY_CREEP_ERROR_MM     16.0f /* creep at or beyond this error */
 #define ENTRY_COAST_MARGIN_MM     6u   /* above the independent near-obstacle trip */
-#define ENTRY_ACCEL_COUNTS       80    /* max rise per 20 ms after rail acquisition */
+#define ENTRY_ACCEL_COUNTS      200    /* max rise per 20 ms; at 1 m/s the ramp must not dominate */
+/* One speed count is this many mm/s: pi*D/CPR per 20 ms. */
+#define MM_S_PER_COUNT          0.1864f
 
 /* Reverse return along the left wall (R command, used by the tuning loop). */
 #define REV_EDGE_SPD          900    /* counts/20 ms, ~17 cm/s            */
@@ -70,6 +92,11 @@
 /* A near-obstacle trip stops the drive but must not freeze the car: backing
    away is always allowed, clipped to this PWM so it can only creep out. */
 #define SAFE_ESCAPE_PWM       4000
+/* Side-only near-obstacle on a wall-following mode: keep the task alive and let
+   the car slide away at this PWM, because zeroing the drive removed the only
+   motion that could recover it. */
+#define SAFE_SIDE_ESCAPE_PWM  2200
+#define SIDE_BLOCK_GIVEUP_MS   3000u
 
 /* ---- differential heading trim (left/right speed split) --------------- */
 #define DIFF_KP            0.0f

@@ -45,6 +45,17 @@ void App_Puts(const char *s)
   xSemaphoreGive(tx_lock);
 }
 
+/* High-rate traces (MOT/HDG) go to UART5 only, the PC link.  Broadcasting them
+   to all three UARTs tripled the traffic at 115200 and started truncating lines
+   mid-field, which made every diagnosis unreliable.  UART5 alone carries the
+   full 25 Hz at ~7.5 kB/s against an 11.5 kB/s link. */
+void App_PutsTrace(const char *s)
+{
+  xSemaphoreTake(tx_lock,portMAX_DELAY);
+  put_raw(s_ports[2], s);
+  xSemaphoreGive(tx_lock);
+}
+
 void App_PutInt(int v)
 {
   char b[12];

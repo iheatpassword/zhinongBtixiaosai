@@ -26,7 +26,7 @@
 
 void Servo_Init(void);
 void Servo_Center(void);
-void Servo_SetAllDeg(int deg);                          /* broadcast */
+void Servo_SetAllDeg(int deg);                          /* calibrated per wheel */
 void Servo_SetOneDeg(uint8_t id, float deg);
 void Servo_Set4Deg(float fl, float fr, float rl, float rr);
 /* Control task: finish previous read before steering TX, query after steering TX. */

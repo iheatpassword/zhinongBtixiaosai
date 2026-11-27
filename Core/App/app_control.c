@@ -15,6 +15,7 @@
 #include "app_config.h"
 #include "app_tasks.h"
 
+#include "app_report.h"
 #include "fsm2.h"
 #include "entry_wall.h"
 #include "safety.h"
@@ -45,6 +46,7 @@ static s8  s_drive;             /* 0 stop, +1 forward, -1 reverse          */
 /* steering */
 static s16 s_steer10[4];
 static u8  s_steer_dirty;
+static u32 s_side_block_ms;   /* when a side beam first blocked a wall-follow */
 
 /* odometry */
 static s32 s_odom;
@@ -305,6 +307,44 @@ static void safety_eval(const AppInputs *in, AppOutputs *out)
 
   if (trip == 0u) return;
 
+  /* A side beam that is too close is not "stop the task": the only way out is
+     to drive while crabbing away from that side, and the old code zeroed the
+     drive and dropped to IDLE, so every drift into the right wall ended the
+     run and waited for a human.  Keep the mode and allow a creep-level drive
+     while the commanded steering points away from the tripped side; freeze
+     otherwise, and give up only if it stays blocked for SIDE_BLOCK_GIVEUP_MS. */
+  if (trip == 0x01u) {
+    int front_bad = (s_sf.vF && (s_sf.dF < SAFE_STOP_MM)) ||
+                    (in->tail_back < SAFE_STOP_MM);
+    int right_bad = s_sf.vR && (s_sf.dR < SAFE_STOP_MM);
+    int left_bad  = s_sf.vL && (s_sf.dL < SAFE_STOP_MM);
+    int wall_mode = (s_mode == APP_MODE_EDGE) || (s_mode == APP_MODE_REV_EDGE);
+
+    if (!front_bad && (left_bad || right_bad) && wall_mode) {
+      float ang = (float)s_steer10[0] / 10.0f;   /* positive = right */
+      int away = right_bad ? (ang < -0.5f) : (ang > 0.5f);
+
+      if (away) {
+        s_side_block_ms = 0u;
+        for (w = 0u; w < 4u; w++) {
+          s16 p = out->pwm[w];
+          if (p >  SAFE_SIDE_ESCAPE_PWM) p =  SAFE_SIDE_ESCAPE_PWM;
+          if (p < -SAFE_SIDE_ESCAPE_PWM) p = -SAFE_SIDE_ESCAPE_PWM;
+          out->pwm[w] = p;
+        }
+        return;                     /* keep the mode and let it slide away */
+      }
+
+      if (s_side_block_ms == 0u) s_side_block_ms = in->ms;
+      if (in->ms - s_side_block_ms < SIDE_BLOCK_GIVEUP_MS) {
+        for (w = 0u; w < 4u; w++) out->pwm[w] = 0;
+        drive_zero();
+        return;                     /* keep the mode, just stop for now */
+      }
+    }
+    s_side_block_ms = 0u;
+  }
+
   /* A distance trip means "do not drive further into this", not "freeze".
      Backing away is always allowed and clipped to a creep PWM, so a car that
      stopped hard against a wall can still get itself out with B or R.  Stall
@@ -373,6 +413,10 @@ void App_PostCmd(AppCmd c)
 
 static void handle_cmd(AppCmd c, const AppInputs *in)
 {
+  if (c == APP_CMD_SERVO_P6 || c == APP_CMD_SERVO_M6) {
+    if (s_mode == APP_MODE_IDLE) set_steer_all(c == APP_CMD_SERVO_P6 ? 6.0f : -6.0f);
+    return;
+  }
   if (s_mode==APP_MODE_FSM2) {
     if (c==APP_CMD_FSM2) return;
     Fsm2_Abort();
@@ -601,22 +645,41 @@ void AppControl_Tick(AppInputs *in, AppOutputs *out)
         s_edge_lost=0u;
         s_edge_last_ok=in->ms;
       }
-      if (!in->laser_fresh || !in->imu_ok ||
-          (!d_lost && d<=stop) || cm>(edge ? (u16)app_tune->entry_max_cm : CRAB_TRAVEL_CM+20u) ||
-          in->ms-s_test_ms>60000u ||
-          (d_lost && (in->ms-s_edge_last_ok)>=400u)) {
+      /* Exit reasons are printed once.  Without them a run that stops after a
+         metre looks identical whether the ridge, the link, the IMU, the travel
+         cap or a lost rail ended it, and every diagnosis becomes a guess. */
+      if (!in->laser_fresh) {
         s_mode=APP_MODE_IDLE; all_zero(); App_SetServoCenter();
+        App_Puts("\r\nEDGE EXIT laser\r\n");
+      } else if (!in->imu_ok) {
+        s_mode=APP_MODE_IDLE; all_zero(); App_SetServoCenter();
+        App_Puts("\r\nEDGE EXIT imu\r\n");
+      } else if (!d_lost && d<=stop) {
+        s_mode=APP_MODE_IDLE; all_zero(); App_SetServoCenter();
+        App_Puts("\r\nEDGE EXIT front\r\n");
+      } else if (cm>(edge ? (u16)app_tune->entry_max_cm : CRAB_TRAVEL_CM+20u)) {
+        s_mode=APP_MODE_IDLE; all_zero(); App_SetServoCenter();
+        App_Puts("\r\nEDGE EXIT cm\r\n");
+      } else if (in->ms-s_test_ms>60000u) {
+        s_mode=APP_MODE_IDLE; all_zero(); App_SetServoCenter();
+        App_Puts("\r\nEDGE EXIT timeout\r\n");
+      } else if (d_lost && (in->ms-s_edge_last_ok)>=400u) {
+        s_mode=APP_MODE_IDLE; all_zero(); App_SetServoCenter();
+        App_Puts("\r\nEDGE EXIT glost\r\n");
       } else if (d_lost) {
         all_zero(); set_steer_all(s_steer10[0]);
       } else if (in->ms-s_test_ms<ROUTE_SETTLE_MS) {
         all_zero(); set_steer_all(edge ? 0 : 90*s_crab_dir);
         s_test_wall_last_ok=in->ms;
       } else if (edge) {
-        EntryWallCommand wall=EntryWall_Update(&s_test_wall,in,cm,app_tune->entry_creep_counts,
+        EntryWallCommand wall=EntryWall_Update(&s_test_wall,in,cm,app_tune->entry_cruise_counts,
                                                app_tune->entry_cruise_counts);
         if (!wall.speed) {
           all_zero(); set_steer_all(0);
-          if (in->ms-s_test_wall_last_ok>=400u) s_mode=APP_MODE_IDLE;
+          if (in->ms-s_test_wall_last_ok>=400u) {
+            s_mode=APP_MODE_IDLE;
+            App_Puts("\r\nEDGE EXIT wall\r\n");
+          }
         } else {
           s_test_wall_last_ok=in->ms;
           if (wall.coast) {

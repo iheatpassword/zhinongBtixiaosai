@@ -12,6 +12,14 @@
 
 /* Wheel -> servo id.  FL=4, FR=3, RL=2, RR=1 (measured on the car). */
 static const uint8_t s_servo_id[4] = { 4u, 3u, 2u, 1u };
+/* Measured in servo position units: RL +21 (+5.04 deg), RR -33 (-7.92 deg). */
+static int center_for_id(uint8_t id)
+{
+  if (id == s_servo_id[2]) return SERVO_CENTER + 21;
+  if (id == s_servo_id[3]) return SERVO_CENTER - 33;
+  return SERVO_CENTER;
+}
+
 static uint8_t wheel, pending;
 /* One six-byte request echo plus its eight-byte response fit in this window. */
 static volatile uint8_t rx[24], rx_count, rx_error;
@@ -86,7 +94,7 @@ static s16 decode_position(const volatile uint8_t *buf, unsigned count, uint8_t 
     unsigned sum=f[2]+f[3]+f[4]+f[5]+f[6]+f[7];
     int pos=f[5]+256*f[6];
     if ((sum & 0xffu)!=0xffu || pos>1000) continue;
-    int scaled=(pos-SERVO_CENTER)*12; /* 0.24 degrees per unit, in tenths */
+    int scaled=(pos-center_for_id(id))*12; /* 0.24 degrees per unit, in tenths */
     return (s16)((scaled+(scaled>=0 ? 2 : -2))/5);
   }
   return SERVO_ANGLE_NA;
@@ -131,31 +139,24 @@ u32 Servo_FeedbackTime(unsigned wheel_index)
 
 void Servo_Center(void)
 {
-  servo_move(SERVO_BROADCAST_ID, (uint16_t)SERVO_CENTER, (uint16_t)SERVO_SLOW_MS);
+  for (unsigned i = 0; i < 4; ++i) {
+    uint8_t id = s_servo_id[i];
+    servo_move(id, (uint16_t)center_for_id(id), SERVO_SLOW_MS);
+  }
 }
 
 void Servo_SetAllDeg(int deg)
 {
-  int pos = SERVO_CENTER + (int)((float)deg * SERVO_UNIT_PER_DEG);
-
-  if (pos < 0)    pos = 0;
-  if (pos > 1000) pos = 1000;
-
-  servo_move(SERVO_BROADCAST_ID, (uint16_t)pos, (uint16_t)SERVO_FAST_MS);
+  Servo_Set4Deg(deg, deg, deg, deg);
 }
 
 void Servo_SetOneDeg(uint8_t id, float deg)
 {
-  float units = (float)SERVO_CENTER + deg * SERVO_UNIT_PER_DEG;
-  int   pos;
-
-  if (units < 0.0f)    units = 0.0f;
+  float units = center_for_id(id) + deg * SERVO_UNIT_PER_DEG;
+  if (units < 0.0f) units = 0.0f;
   if (units > 1000.0f) units = 1000.0f;
-
-  pos = (int)units;
-  servo_move(id, (uint16_t)pos, (uint16_t)SERVO_FAST_MS);
+  servo_move(id, (uint16_t)units, SERVO_FAST_MS);
 }
-
 void Servo_Set4Deg(float fl, float fr, float rl, float rr)
 {
   Servo_SetOneDeg(s_servo_id[0], fl);
