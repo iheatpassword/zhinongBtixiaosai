@@ -12,7 +12,10 @@ int EntryWall_Pair(const AppInputs *in, int left, u16 limit,
   unsigned side = left ? LW_LEFT : LW_RIGHT;
   u16 front = left ? in->dL : in->dR;
   u16 rear = left ? in->tail_left : in->tail_right;
-  if (!in->use_tail || front >= limit || rear >= limit) return 0;
+  if (!in->use_tail || !in->tail_fresh || !in->laser_fresh ||
+      !(in->laser_flags & lw_channel_bit(side)) || !(in->tail_flags & lw_channel_bit(side)) ||
+      in->range_age[side] > LW_MAX_AGE_MS || in->tail_age[side] > LW_MAX_AGE_MS ||
+      front == 0 || rear == 0 || front >= limit || rear >= limit) return 0;
   int delta = (int)front - rear;
   int skew = (int)in->range_age[side] - in->tail_age[side];
   if (abs(delta) > WALL_PAIR_MAX_DIFF_MM || abs(skew) > WALL_PAIR_MAX_SKEW_MS) return 0;
@@ -24,7 +27,7 @@ int EntryWall_Pair(const AppInputs *in, int left, u16 limit,
   return 1;
 }
 
-EntryWallCommand EntryWall_Update(EntryWall *wall, const AppInputs *in, u16 travel_cm,
+static EntryWallCommand entry_guidance(EntryWall *wall, const AppInputs *in, u16 travel_cm,
                                   s16 search_speed, s16 cruise_speed)
 {
   EntryWallCommand cmd = {0};
@@ -48,7 +51,10 @@ EntryWallCommand EntryWall_Update(EntryWall *wall, const AppInputs *in, u16 trav
     wall->speed_error_mm = 0;
     wall->integ_deg = 0;
     wall->speed_ms = 0;
-    wall->last_speed = 0;
+    /* Keep last_speed: the nose-left beam drops out for single frames all the
+       time (dL 65 -> 2000 -> 65), and zeroing the speed baseline here made every
+       dropout restart the acceleration ramp, which is the stutter the car shows
+       while it is correcting. */
     /* Inside the search window "the wall is gone" only means "not found yet",
        so drop the lock and keep looking.  Outside it the lock stays sticky:
        losing the wall there is a real fault and the caller must stop.  Without
@@ -64,7 +70,9 @@ EntryWallCommand EntryWall_Update(EntryWall *wall, const AppInputs *in, u16 trav
        blind at cruise is fine while the corridor is clear, but the ridge still
        has to stop the car, and this branch returns before the ramp below. */
     {
-      float cap = sqrtf(2.0f * app_tune->entry_decel_mm_s2 * (float)in->dF) / MM_S_PER_COUNT;
+      /* Rolled back: braking toward 0 mm rather than toward the stop line lets the
+       car carry on into the ridge, which is where it has to end up. */
+    float cap = sqrtf(2.0f * app_tune->entry_decel_mm_s2 * (float)in->dF) / MM_S_PER_COUNT;
       if (cap < (float)cmd.speed) cmd.speed = (s16)cap;
       if (cmd.speed < 0) cmd.speed = 0;
     }
@@ -100,7 +108,14 @@ EntryWallCommand EntryWall_Update(EntryWall *wall, const AppInputs *in, u16 trav
     }
   }
   if (wall->near_samples < app_tune->entry_acquire_votes) {
-    if (!wall->acquired && travel_cm < app_tune->entry_search_limit_cm) cmd.speed = app_tune->entry_creep_counts;
+    /* Only creep while the car has not started moving yet.  Once it is at
+       cruise a single lost sample must not drop 5000 -> 450 (8 cm/s); that drop
+       and the ramp back up is what looked like "it slows down to steer". */
+    if (!wall->acquired && travel_cm < app_tune->entry_search_limit_cm &&
+        in->wheel_speed_mm_s < 100.0f)
+      cmd.speed = app_tune->entry_creep_counts;
+    else if (wall->last_speed > 0)
+      cmd.speed = wall->last_speed;
     return cmd;
   }
   wall->acquired = 1;
@@ -180,25 +195,22 @@ EntryWallCommand EntryWall_Update(EntryWall *wall, const AppInputs *in, u16 trav
     wall->speed_error_mm += (error - wall->speed_error_mm) * alpha;
   }
 
-  float speed_error = wall->speed_error_mm;
-  float fraction = (app_tune->entry_creep_error_mm - speed_error) / (app_tune->entry_creep_error_mm - app_tune->entry_full_error_mm);
-  fraction = fminf(1.0f, fmaxf(0.0f, fraction));
-  cmd.speed = app_tune->entry_creep_counts;
-  /* Reference route style: the forward speed is a constant and the lateral
-     position is corrected by steering (vy), never by slowing down - its vy is
-     clamped to 45 mm/s, so it always runs flat out.  Throttling on the lateral
-     error instead made the speed oscillate with the wall loop and kept the
-     average at a third of the peak (T median 1400 of a 5000 command, V peak
-     907 mm/s).  The envelope survives only as a sanity floor: past
-     entry_creep_error_mm the car has lost the wall and creeps. */
-  if (speed_error < app_tune->entry_creep_error_mm)
-    cmd.speed += (s16)((cruise_speed - app_tune->entry_creep_counts) * fraction);
+  /* Constant forward speed, reference-route style.  The lateral position is
+     corrected by steering alone - their vy is clamped to 45 mm/s and vx never
+     changes.  Any lateral-error term here (envelope, creep floor, gate) makes
+     the speed surge and sag with the wall loop, which is exactly the
+     accelerate/decelerate the car was showing: the only things allowed to shape
+     the speed are the braking curve below and the per-cycle accel limit.
+     wall->speed_error_mm is still tracked for diagnostics. */
+  cmd.speed = cruise_speed;
   /* Final approach: brake along the physically correct curve for a constant
      deceleration, v = sqrt(2*a*d), instead of the reference route's linear
      dF/1200.  Linear starts slowing far too early - at 1.2 m it was already
      below cruise and the last metre dragged - while sqrt keeps full speed
      until the braking distance and then sheds it at exactly `decel`. */
   {
+    /* Rolled back: braking toward 0 mm rather than toward the stop line lets the
+       car carry on into the ridge, which is where it has to end up. */
     float cap = sqrtf(2.0f * app_tune->entry_decel_mm_s2 * (float)in->dF) / MM_S_PER_COUNT;
     if (cap < (float)cmd.speed) cmd.speed = (s16)cap;
     if (cmd.speed < 0) cmd.speed = 0;
@@ -221,7 +233,7 @@ EntryWallCommand EntryWall_Update(EntryWall *wall, const AppInputs *in, u16 trav
      subtracted - getting it backwards turns the loop into positive feedback. */
   {
     float wz = app_tune->entry_yaw_wz_kp * in->yaw_deg
-             + app_tune->entry_yaw_wz_kd * (0.0f - in->yaw_rate_dps);
+             + app_tune->entry_yaw_wz_kd * in->yaw_rate_dps;
     float trim;
     if (wz >  app_tune->entry_yaw_wz_max) wz =  app_tune->entry_yaw_wz_max;
     if (wz < -app_tune->entry_yaw_wz_max) wz = -app_tune->entry_yaw_wz_max;
@@ -242,6 +254,49 @@ EntryWallCommand EntryWall_Update(EntryWall *wall, const AppInputs *in, u16 trav
   cmd.coast = in->wheel_speed_mm_s > creep_mm_s + app_tune->entry_coast_extra_mm_s &&
               fminf(fminf(in->dL, center_mm), predicted_mm) <= SAFE_STOP_MM + app_tune->entry_coast_margin_mm;
   if (cmd.coast && cmd.angle < 0) cmd.angle = 0;
+
+  /* Slew-limit the common angle.  The reference route commands a lateral
+     VELOCITY and lets the inverse kinematics turn it into at most ~2.6 deg of
+     crab, with the PID output slope-limited, so the body just eases sideways.
+     Ours computes an angle straight from the error, so when the error changes
+     sign the servo is ordered to swing the whole way in one 20 ms tick - that
+     is the stiff, snatching feel.  Ramping the angle costs a few tens of
+     milliseconds of response and removes the snap. */
+  {
+    float step = app_tune->entry_steer_slew_dps * ((float)APP_CTRL_MS / 1000.0f);
+    if (cmd.angle > wall->last_angle + step) cmd.angle = wall->last_angle + step;
+    if (cmd.angle < wall->last_angle - step) cmd.angle = wall->last_angle - step;
+    wall->last_angle = cmd.angle;
+  }
+
   wall->last_speed = cmd.coast ? 0 : cmd.speed;
+  return cmd;
+}
+
+/* Applied during search as well as tracking. A ridge end can appear first
+   beside either axle while the other three side beams still see open space. */
+EntryWallCommand EntryWall_Update(EntryWall *wall, const AppInputs *in, u16 travel_cm,
+                                  s16 search_speed, s16 cruise_speed)
+{
+  EntryWallCommand cmd = entry_guidance(wall, in, travel_cm, search_speed, cruise_speed);
+  unsigned nearest = BSP_DIST_INVALID;
+  for (unsigned side = LW_LEFT; side <= LW_RIGHT; ++side) {
+    unsigned front = side == LW_LEFT ? in->dL : in->dR;
+    unsigned rear = side == LW_LEFT ? in->tail_left : in->tail_right;
+    if (in->laser_fresh && (in->laser_flags & lw_channel_bit(side)) &&
+        in->range_age[side] <= LW_MAX_AGE_MS && front < nearest) nearest = front;
+    if (in->use_tail && in->tail_fresh && (in->tail_flags & lw_channel_bit(side)) &&
+        in->tail_age[side] <= LW_MAX_AGE_MS && rear < nearest) nearest = rear;
+  }
+  float margin = SAFE_STOP_MM + app_tune->entry_coast_margin_mm;
+  float fraction = fminf(1.0f, fmaxf(0.0f, (nearest - margin) / 20.0f));
+  s16 cap = (s16)(app_tune->entry_creep_counts +
+                  fraction * (cruise_speed - app_tune->entry_creep_counts));
+  if (cmd.speed > cap) cmd.speed = cap;
+  if (nearest <= margin) {
+    cmd.coast = 1;
+    cmd.speed = 0;
+  }
+  if (wall->last_speed > cmd.speed) wall->last_speed = cmd.speed;
   return cmd;
 }

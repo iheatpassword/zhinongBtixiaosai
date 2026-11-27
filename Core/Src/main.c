@@ -104,16 +104,13 @@ int main(void)
   MX_TIM3_Init();
   MX_TIM4_Init();
   MX_TIM5_Init();
-  MX_TIM8_Init();
   MX_TIM9_Init();
   MX_TIM10_Init();
   MX_TIM11_Init();
-  MX_TIM12_Init();
   MX_UART4_Init();
   MX_UART5_Init();
-  MX_USART1_UART_Init();
   MX_USART2_UART_Init();
-  MX_USART3_UART_Init();
+  MX_USART6_UART_Init();
   MX_USB_OTG_FS_HCD_Init();
   MX_IWDG_Init();
   /* USER CODE BEGIN 2 */

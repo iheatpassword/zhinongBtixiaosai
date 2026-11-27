@@ -2,6 +2,7 @@
 #include "tune_params.h"
 #include "fsm2.h"
 #include "entry_wall.h"
+#include "route_ranges.h"
 #include "app_config.h"
 #include "laser_wire.h"
 #include "safety.h"
@@ -17,6 +18,7 @@ static u32 start_ms, missing_ms;
 static u16 origin, edge_cm, first_match_cm;
 static u8 turning, quiet_ticks, stopping;
 static u16 stop_lead_mm;
+static u8 endpoint_from_tail;
 static u8 braking;
 static u8 wait_reason, ridge_sum_warning;
 static u8 entered, missing, votes, previous_seq, have_seq, saw_plate, saw_exit;
@@ -68,7 +70,7 @@ static int ready_to_drive(const AppInputs *in, int target10)
   for (unsigned i=0; i<4; ++i) {
     if (abs(in->wheel_cnt[i])>20) quiet=0;
     if ((s32)(in->steer_sample_ms[i]-start_ms)<=0 ||
-        abs((int)in->steer_feedback10[i]-target10)>20) aligned=0;
+        abs((int)in->steer_feedback10[i]-target10)>40) aligned=0;
   }
   if (!quiet) quiet_ticks=0;
   else if (quiet_ticks<3) quiet_ticks++;
@@ -141,19 +143,27 @@ void Fsm2_Tick(const AppInputs *in, u16 odom, Fsm2Output *out)
     int entry=state==F2_ENTRY;
     int right=out->action==F2A_CRAB_R;
     unsigned ch=entry ? LW_FRONT : right ? LW_RIGHT : LW_LEFT;
-    u16 d=entry ? in->dF : right ? in->dR : in->dL;
+    /* Across the open ends of the ridges, a side beam may see a ridge end
+       rather than the perimeter. Only use the alternate endpoint beam inside
+       the mapped arrival window. */
+    RouteRange endpoint_range = {in->dF, in->range_age[ch], in->sample_seq[ch], 0};
+    if (!entry) endpoint_range = RouteRange_Side(in,ch,cm>=CRAB_TRAVEL_CM-35u);
+    if (endpoint_from_tail != endpoint_range.from_tail) {
+      votes=0; have_seq=0;
+      endpoint_from_tail=endpoint_range.from_tail;
+    }
+    u16 d=endpoint_range.mm;
     u16 target=entry ? app_tune->entry_stop_mm : SIDE_CENTER_MM;
     u16 min_cm=entry ? (u16)app_tune->entry_min_cm : CRAB_TRAVEL_CM-35u;
     u16 max_cm=entry ? (u16)app_tune->entry_max_cm : CRAB_TRAVEL_CM+20u;
     /* Outside the two end aisles the forward/backward beams see the furrow.
        A single beam can guide when the other drops out. */
     out->track_ridge=!entry && cm>=35u && cm<=CRAB_TRAVEL_CM-35u;
-    int front_ref=in->vF && in->dF>=70u && in->dF<=380u;
-    int back_ref=in->vB && in->dB>=40u && in->dB<=300u;
-    int sum_error=(int)in->dF+in->dB-(int)(ENTRY_STOP_MM+REAR_TARGET_MM);
-    int disagreement=front_ref && back_ref &&
-        (sum_error<-(int)RIDGE_SUM_TOL_MM || sum_error>(int)RIDGE_SUM_TOL_MM);
-    ridge_sum_warning=out->track_ridge && disagreement;
+    float ridge_error;
+    RidgeStatus ridge = !entry ? RouteRange_Ridge(in,&ridge_error) : RIDGE_MISSING;
+    /* A consistent pair identifies the ridge even at the open ends. */
+    if (ridge == RIDGE_PAIR) out->track_ridge=1;
+    ridge_sum_warning = ridge == RIDGE_DISAGREE;
     if (entry) {
       EntryWallCommand wall=EntryWall_Update(&entry_wall,in,cm,app_tune->route_entry_search,
                                              app_tune->route_entry_cruise);
@@ -164,12 +174,17 @@ void Fsm2_Tick(const AppInputs *in, u16 odom, Fsm2Output *out)
     }
     if (cm>max_cm || (d<=target && cm<min_cm)) Fsm2_Fail(F2_BAD_LANDMARK);
     else if (d==BSP_DIST_INVALID) wait_sensor(in,out,F2W_ENDPOINT);
-    else if (entry && !out->forward_speed) wait_sensor(in,out,F2W_ENTRY_WALL);
-    else if (out->track_ridge && !front_ref && !back_ref) wait_sensor(in,out,F2W_NO_RIDGE);
+    /* A zero wall-loop speed means "lost the rail" only while the car has not yet
+       covered the minimum entry distance.  Past that point the same zero appears
+       naturally as the car brakes to a stop on the endpoint, and treating it as
+       a lost rail faulted the run at the instant of arrival (observed: dF=217,
+       V=0, then F2_MISSING_RANGE). */
+    else if (entry && !out->forward_speed && cm < min_cm) wait_sensor(in,out,F2W_ENTRY_WALL);
+    else if (out->track_ridge && ridge == RIDGE_MISSING) wait_sensor(in,out,F2W_NO_RIDGE);
     else {
       missing=0;
       float v=in->wheel_speed_mm_s;
-      float lag_mm=v*(in->range_age[ch]+APP_CTRL_MS)/1000.0f;
+      float lag_mm=v*(endpoint_range.age+APP_CTRL_MS)/1000.0f;
       float coast=entry ? app_tune->entry_final_coast_mm : ROUTE_FINAL_COAST_MM;
       float lag_ms=entry ? app_tune->entry_drive_lag_ms : ROUTE_DRIVE_LAG_MS;
       float terminal=entry ? app_tune->entry_final_speed_mm_s : ROUTE_FINAL_SPEED_MM_S;
@@ -182,7 +197,7 @@ void Fsm2_Tick(const AppInputs *in, u16 odom, Fsm2Output *out)
       lead+=(u16)fminf(lag_mm,12.0f);
       if (!votes) stop_lead_mm=lead;
       int endpoint=cm>=min_cm && d<=target+stop_lead_mm;
-      complete=confirmed(endpoint,in->sample_seq[ch],cm);
+      complete=confirmed(endpoint,endpoint_range.seq,cm);
       out->hold|=endpoint;
       /* The velocity ceiling drives the PI throughout approach. Only endpoint
          arrival requests zero PWM; cruise overshoot must not reset the PI. */
@@ -190,16 +205,24 @@ void Fsm2_Tick(const AppInputs *in, u16 odom, Fsm2Output *out)
     }
   } else if (state==F2_REV_PARK) {
     turning=0;
-    out->speed_limit=ROUTE_CREEP_COUNTS;
+    /* The final exit used to run the whole way at creep (450 counts, ~8.4 cm/s)
+       and took 12.6 s.  Run it at the reverse cruise and brake on the remaining
+       odometry instead, so leaving the field is as quick as entering it. */
+    {
+      float rem=(float)(PARK_TRAVEL_CM>cm ? PARK_TRAVEL_CM-cm : 0u)*10.0f;
+      s16 lim=approach_limit(rem,0);
+      out->speed_limit=(lim<REV_SPD) ? lim : REV_SPD;
+    }
     /* The outside wall can end at the mouth of the start box. Check the
        initial alignment while still in the aisle, then finish by odometry. */
-    if (cm<10u && (!in->vL || in->dL<35u || in->dL>85u)) wait_sensor(in,out,F2W_PARK_ALIGN);
+    RouteRange park_wall=RouteRange_Side(in,LW_LEFT,1);
+    if (cm<10u && (park_wall.mm<35u || park_wall.mm>85u)) wait_sensor(in,out,F2W_PARK_ALIGN);
     else { missing=0; complete=cm>=PARK_TRAVEL_CM; }
   } else {
     turning=0;
     unsigned inner=out->wall_left ? LW_RIGHT : LW_LEFT;
     u16 d=out->wall_left ? in->dR : in->dL;
-    u16 wall_mm=out->wall_left ? in->dL : in->dR;
+    u16 wall_mm=RouteRange_Side(in,out->wall_left ? LW_LEFT : LW_RIGHT,1).mm;
     int wall=wall_mm<300u;
     if ((!saw_plate && cm>34u) || (!saw_exit && cm>58u) || cm>ROW_PITCH_CM+18u)
       Fsm2_Fail(F2_BAD_LANDMARK);

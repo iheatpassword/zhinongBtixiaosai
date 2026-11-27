@@ -38,8 +38,6 @@ typedef struct
   u8   id;
 } CmdPort;
 
-static CmdPort s_p1;
-static CmdPort s_p3;
 static CmdPort s_p5;
 
 /* Last accepted command, for the on-screen / log diagnostic. */
@@ -226,15 +224,13 @@ void AppCmd_Init(void)
   s_last_cmd  = ' ';
   s_last_port = 0u;
 
-  port_start(&s_p1, &huart1, 1u);
-  port_start(&s_p3, &huart3, 3u);
+  /* Console on UART5 only: USART3 and UART4 now carry the two F1 laser
+     uplinks, so they must not also be command ports. */
   port_start(&s_p5, &huart5, 5u);
 }
 
 void AppCmd_Poll(void)
 {
-  port_poll(&s_p1);
-  port_poll(&s_p3);
   port_poll(&s_p5);
   Tune_PollList();
 }
@@ -243,8 +239,8 @@ void AppCmd_HandleKey(u8 ev)
 {
   switch (ev)
   {
-    case KEY_EV_SINGLE: App_PostCmd(APP_CMD_EDGE);     break;
-    case KEY_EV_DOUBLE: App_PostCmd(APP_CMD_FSM2);     break;
+    case KEY_EV_SINGLE: App_PostCmd(APP_CMD_FSM2);     break;
+    case KEY_EV_DOUBLE: App_PostCmd(APP_CMD_EDGE);     break;
     case KEY_EV_TRIPLE: App_PostCmd(APP_CMD_CRAB_R);   break;
     case KEY_EV_LONG:   App_PostCmd(APP_CMD_WHEELTEST);break;
     default: break;

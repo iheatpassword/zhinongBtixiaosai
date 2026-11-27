@@ -4,6 +4,7 @@
   */
 #include "servo.h"
 #include "usart.h"
+#include <math.h>
 
 #define SERVO_TX_TIMEOUT_MS  5u
 #define SERVO_POS_READ       0x1Cu
@@ -12,11 +13,22 @@
 
 /* Wheel -> servo id.  FL=4, FR=3, RL=2, RR=1 (measured on the car). */
 static const uint8_t s_servo_id[4] = { 4u, 3u, 2u, 1u };
-/* Measured in servo position units: RL +21 (+5.04 deg), RR -33 (-7.92 deg). */
+/* Per-wheel centre trim, in DEGREES of wheel angle, measured with a straight
+   edge along the body at C.  Written in degrees on purpose: the servo position
+   units (4.1667 per degree) hid a mistake here once already, and a wrong trim
+   is indistinguishable from linkage slack - it makes the car crab and forces the
+   steering loop to fight a bias it cannot see. */
+#define SERVO_TRIM_FL_DEG    1.0f
+#define SERVO_TRIM_FR_DEG    (-1.0f)
+#define SERVO_TRIM_RL_DEG    0.0f
+#define SERVO_TRIM_RR_DEG  (0.0f)
+static const float s_trim_deg[4] = { SERVO_TRIM_FL_DEG, SERVO_TRIM_FR_DEG,
+                                     SERVO_TRIM_RL_DEG, SERVO_TRIM_RR_DEG };
 static int center_for_id(uint8_t id)
 {
-  if (id == s_servo_id[2]) return SERVO_CENTER + 21;
-  if (id == s_servo_id[3]) return SERVO_CENTER - 33;
+  int i;
+  for (i = 0; i < 4; ++i)
+    if (id == s_servo_id[i]) return SERVO_CENTER + (int)roundf(s_trim_deg[i] * SERVO_UNIT_PER_DEG);
   return SERVO_CENTER;
 }
 

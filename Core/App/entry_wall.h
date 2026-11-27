@@ -16,6 +16,7 @@ typedef struct {
   float integ_deg;      /* integral action that walks the wheel past linkage slack */
   u32 speed_ms;
   s16 last_speed;
+  float last_angle;   /* previous common angle, for the slew limit */
 } EntryWall;
 
 typedef struct {

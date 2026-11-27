@@ -34,10 +34,11 @@ typedef struct AppInputs
   u8  laser_fresh, laser_flags;
   u8  sample_seq[4], range_age[4];
   u16 tail_left, tail_right, tail_back; /* fresh distance or BSP_DIST_INVALID */
-  u8 tail_age[2]; /* left/right sample ages, ms */
+  u8 tail_age[4], tail_seq[4]; /* wire order: left, right, forward, back */
   u8 tail_fresh, tail_flags, use_tail;
   u8  imu_ok;
   s16 wheel_cnt[4];           /* signed counts this period, FL FR RL RR */
+  u32 encoder_period_ms;      /* elapsed time covered by wheel_cnt */
   s16 steer_target10[4], steer_feedback10[4]; /* FL FR RL RR, tenths of a degree */
   u32 steer_sample_ms[4];
   float sample_dt_s;

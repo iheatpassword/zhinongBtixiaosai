@@ -6,7 +6,7 @@
     "configurations": [
         {
             "cwd": "${workspaceRoot}",
-            "executable": "build/Debug/C30D_CubeMX.elf",
+            "executable": "build/Debug/C30D_CubeMX.hex",
             "name": "Debug with OpenOCD",
             "request": "launch",
             "type": "cortex-debug",

@@ -28,7 +28,9 @@ static StaticSemaphore_t tx_storage;
 static SemaphoreHandle_t tx_lock;
 void Report_Init(void) { tx_lock=xSemaphoreCreateMutexStatic(&tx_storage); }
 
-static UART_HandleTypeDef *const s_ports[3] = { &huart1, &huart3, &huart5 };
+/* Console port.  USART1 and USART3 no longer exist in the project: USART6 took
+   over the rear F1 laser uplink and UART4 carries the head board. */
+static UART_HandleTypeDef *const s_ports[1] = { &huart5 };
 
 static void put_raw(UART_HandleTypeDef *h, const char *s)
 {
@@ -38,21 +40,20 @@ static void put_raw(UART_HandleTypeDef *h, const char *s)
 
 void App_Puts(const char *s)
 {
-  u8 i;
-
+  /* Console on UART5 only: USART3 and UART4 now carry the two F1 laser
+     uplinks, so the console must not share them. */
   xSemaphoreTake(tx_lock,portMAX_DELAY);
-  for (i = 0u; i < 3u; i++) put_raw(s_ports[i], s);
+  put_raw(s_ports[0], s);
   xSemaphoreGive(tx_lock);
 }
 
-/* High-rate traces (MOT/HDG) go to UART5 only, the PC link.  Broadcasting them
-   to all three UARTs tripled the traffic at 115200 and started truncating lines
-   mid-field, which made every diagnosis unreliable.  UART5 alone carries the
-   full 25 Hz at ~7.5 kB/s against an 11.5 kB/s link. */
+/* High-rate traces (MOT/HDG) share UART5 with the console.  One port at 25 Hz
+   is ~7.5 kB/s against an 11.5 kB/s link; broadcasting to three tripled that and
+   truncated lines mid-field, which made every diagnosis unreliable. */
 void App_PutsTrace(const char *s)
 {
   xSemaphoreTake(tx_lock,portMAX_DELAY);
-  put_raw(s_ports[2], s);
+  put_raw(s_ports[0], s);
   xSemaphoreGive(tx_lock);
 }
 

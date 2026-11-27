@@ -25,7 +25,6 @@
 #include "app_report.h"
 #include "motion_trace.h"
 
-#define CTRL_PERIOD_MS      20u
 #define LASER_PERIOD_MS      5u
 #define CMD_PERIOD_MS       10u
 #define MON_PERIOD_MS      100u
@@ -101,7 +100,8 @@ static void sample_inputs(AppInputs *in)
   in->laser_flags = laser.flags;
   u32 frame_age=BSP_Ms()-laser.last_ms;
   u32 tail_lag = BSP_Ms() - tail.last_ms;
-  for (w=0; w<2; w++) {
+  for (w=0; w<4; w++) {
+    in->tail_seq[w] = tail.sample_seq[w];
     u32 age = tail_lag + tail.sample_age[w];
     in->tail_age[w] = tail.valid && age < 255u ? (u8)age : 255u;
   }
@@ -119,7 +119,8 @@ static void sample_inputs(AppInputs *in)
   /* Measured period, not a hard-coded 20 ms: the old firmware integrated the
      heading with a constant 0.02 s and therefore produced a heading that
      drifted away from real time whenever the loop slipped. */
-  dt = (float)(now - s_prev_ms) / 1000.0f;
+  in->encoder_period_ms = now - s_prev_ms;
+  dt = (float)in->encoder_period_ms / 1000.0f;
   if (dt < 0.005f) dt = 0.005f;
   if (dt > 0.100f) dt = 0.100f;
   s_prev_ms = now;
@@ -186,7 +187,7 @@ static void ctrl_task(void *arg)
     publish_inputs(&in);
 
     g_ctl_ticks++;
-    vTaskDelayUntil(&last, pdMS_TO_TICKS(CTRL_PERIOD_MS));
+    vTaskDelayUntil(&last, pdMS_TO_TICKS(APP_CTRL_MS));
   }
 }
 
