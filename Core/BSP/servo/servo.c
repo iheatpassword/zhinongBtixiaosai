@@ -21,7 +21,7 @@ static const uint8_t s_servo_id[4] = { 4u, 3u, 2u, 1u };
 #define SERVO_TRIM_FL_DEG    1.0f
 #define SERVO_TRIM_FR_DEG    (-1.0f)
 #define SERVO_TRIM_RL_DEG    0.0f
-#define SERVO_TRIM_RR_DEG  (0.0f)
+#define SERVO_TRIM_RR_DEG    0.0f
 static const float s_trim_deg[4] = { SERVO_TRIM_FL_DEG, SERVO_TRIM_FR_DEG,
                                      SERVO_TRIM_RL_DEG, SERVO_TRIM_RR_DEG };
 static int center_for_id(uint8_t id)

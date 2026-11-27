@@ -205,14 +205,7 @@ void Fsm2_Tick(const AppInputs *in, u16 odom, Fsm2Output *out)
     }
   } else if (state==F2_REV_PARK) {
     turning=0;
-    /* The final exit used to run the whole way at creep (450 counts, ~8.4 cm/s)
-       and took 12.6 s.  Run it at the reverse cruise and brake on the remaining
-       odometry instead, so leaving the field is as quick as entering it. */
-    {
-      float rem=(float)(PARK_TRAVEL_CM>cm ? PARK_TRAVEL_CM-cm : 0u)*10.0f;
-      s16 lim=approach_limit(rem,0);
-      out->speed_limit=(lim<REV_SPD) ? lim : REV_SPD;
-    }
+    out->speed_limit=ROUTE_CREEP_COUNTS;
     /* The outside wall can end at the mouth of the start box. Check the
        initial alignment while still in the aisle, then finish by odometry. */
     RouteRange park_wall=RouteRange_Side(in,LW_LEFT,1);

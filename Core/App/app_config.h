@@ -24,7 +24,7 @@
 #define PWM_LIM            12000
 
 /* ---- 4WS edge following (S1 / ENTRY) ---------------------------------- */
-#define EDGE_SPD           5000     /* forward speed counts/20 ms         */
+#define EDGE_SPD           2600     /* forward speed counts/20 ms         */
 #define EDGE_KP            0.10f    /* deg per mm                         */
 #define EDGE_MAX           5.0f     /* steering clamp, deg                */
 
@@ -42,7 +42,7 @@
 #define ENTRY_SEARCH_LIMIT_CM    100u /* startup opening */
 #define ENTRY_WALL_BAND_MM        15  /* either side of SIDE_CENTER_MM */
 #define ENTRY_WALL_HYST_VOTES      8u /* consecutive off-band samples before cruise->creep */
-#define ENTRY_WALL_KP           0.20f /* wheel angle in degrees/mm */
+#define ENTRY_WALL_KP           0.12f /* wheel angle in degrees/mm */
 #define ENTRY_WALL_MAX_DEG      15.0f
 /* The steering linkage has a few degrees of slack.  A 10 mm error asks for 1 deg,
    the linkage swallows it, and the offset never closes - so the loop needs
@@ -54,8 +54,8 @@
    were corrected the feed-forward only has to cover the real backlash and must
    not fire on errors inside the tolerance band - at 3 mm / 3.5 deg a 4 mm error
    produced a 6.5 deg steering command and the wheels visibly swung at rest. */
-#define ENTRY_STEER_DEADZONE_DEG 6.0f
-#define ENTRY_STEER_DEADZONE_MM  3.0f
+#define ENTRY_STEER_DEADZONE_DEG 2.0f
+#define ENTRY_STEER_DEADZONE_MM  10.0f
 #define ENTRY_RANGE_FILTER_MS   100.0f /* time constant for lateral range rate */
 #define ENTRY_SPEED_FILTER_MS    1200u /* slow average of the lateral error, diagnostics only */
 /* Body-angle trim: a sustained range rate at speed means the body is angled to
@@ -118,7 +118,7 @@
 #define DIFF_FF            (-55.0f) /* proven 2600 pure-diff trim, counts */
 
 /* ---- crab / ridge shift ----------------------------------------------- */
-#define SHIFT_SPD          5000
+#define SHIFT_SPD          2600
 #define REV_FIND_PLATE_COUNTS   1800 /* counts/20 ms, before near plate confirmation */
 #define ROUTE_TURN_COAST_MM_S   80u /* max individual wheel speed for steering under zero drive */
 #define REV_SPD             SHIFT_SPD     /* reverse ridge-change cruise, counts/20 ms */
@@ -148,7 +148,7 @@
 #define ROUTE_TEST_STOP_AFTER_ROW2 0u
 #endif
 /* Approach envelope in mm and seconds. Final coast was measured at 77-79 mm/s. */
-#define ROUTE_DECEL_MM_S2      1200.0f
+#define ROUTE_DECEL_MM_S2       600.0f
 #define ROUTE_DRIVE_LAG_MS      150u /* margin for the speed loop / PWM slew */
 #define ROUTE_FINAL_COAST_MM    9u
 #define ROUTE_FINAL_SPEED_MM_S  80u
