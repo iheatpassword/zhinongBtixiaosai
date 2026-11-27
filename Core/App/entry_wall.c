@@ -17,8 +17,8 @@ int EntryWall_Pair(const AppInputs *in, int left, u16 limit,
   int skew = (int)in->range_age[side] - in->tail_age[side];
   if (abs(delta) > WALL_PAIR_MAX_DIFF_MM || abs(skew) > WALL_PAIR_MAX_SKEW_MS) return 0;
   *center_mm = 0.5f * (front + rear);
-  /* Positive small steering drives forward toward the left wall. */
-  float trim = (left ? delta : -delta) * app_tune->entry_yaw_trim_gain / WALL_SENSOR_BASELINE_MM;
+  /* Negative small steering points the wheels left. */
+  float trim = (left ? -delta : delta) * app_tune->entry_yaw_trim_gain / WALL_SENSOR_BASELINE_MM;
   *forward_trim = fminf(app_tune->entry_yaw_trim_max_deg,
                         fmaxf(-app_tune->entry_yaw_trim_max_deg, trim));
   return 1;
@@ -173,23 +173,11 @@ EntryWallCommand EntryWall_Update(EntryWall *wall, const AppInputs *in, u16 trav
   }
   cmd.yaw_trim_deg = wall->pair_trim_deg;
 
-  /* Measured on the car: at small angles a POSITIVE command moves the body
-     toward the left wall, the opposite of the "positive is right" convention
-     this file was written against.  At +90 deg the documented direction holds,
-     which is why the error only ever showed up in the fine-tracking loop - and
-     it made that loop positive feedback (dL too large -> steer right -> dL
-     larger), so the car could never settle on the target. */
-  {
-    /* Applied before the coast check so its sign test sees the real direction. */
-    float swapped = -cmd.angle;
-    cmd.angle = swapped;
-  }
-
   float creep_mm_s = app_tune->entry_creep_counts * (3.14159265f * WHEEL_DIAMETER_MM * 1000.0f /
                                                      (ENCODER_CPR * APP_CTRL_MS));
   cmd.coast = in->wheel_speed_mm_s > creep_mm_s + app_tune->entry_coast_extra_mm_s &&
               fminf(fminf(in->dL, center_mm), predicted_mm) <= SAFE_STOP_MM + app_tune->entry_coast_margin_mm;
-  if (cmd.coast && cmd.angle > 0) cmd.angle = 0;
+  if (cmd.coast && cmd.angle < 0) cmd.angle = 0;
   wall->last_speed = cmd.coast ? 0 : cmd.speed;
   return cmd;
 }

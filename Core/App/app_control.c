@@ -148,7 +148,7 @@ static float reverse_wall_angle(const AppInputs *in, int left, int standalone, f
   float target = left ? app_tune->entry_side_target_mm : SIDE_CENTER_MM;
   float kp = standalone ? app_tune->entry_wall_kp : app_tune->edge_kp;
   float limit = standalone ? app_tune->entry_wall_max_deg : app_tune->edge_max;
-  float angle = (left ? -1.0f : 1.0f) * kp * (center - target);
+  float angle = (left ? 1.0f : -1.0f) * kp * (center - target);
   return fminf(limit, fmaxf(-limit, angle));
 }
 
